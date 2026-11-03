@@ -2,7 +2,8 @@
 
 Search the files haiku.rag indexes and land on the exact page and passage.
 It talks to the local search service (`haiku-ingester serve`, contract in
-[`docs/local-search-api.md`](../../docs/local-search-api.md)).
+haiku.rag's [`docs/local-search-api.md`](https://github.com/tolgaerdonmez/haiku.rag/blob/main/docs/local-search-api.md)).
+The [installer](../README.md) builds, registers and updates it.
 
 ## Commands
 
@@ -35,12 +36,13 @@ manifest cannot declare one and Raycast has no configuration file for them,
 so a hotkey can be set in two ways:
 
 - **Declaratively, through Karabiner-Elements.**
-  [`hotkey/karabiner-haiku-search.json`](hotkey/karabiner-haiku-search.json)
+  [`karabiner/haiku-search.json`](../karabiner/haiku-search.json)
   is a complex-modification rule mapping ⌘⇧F to
   `open 'raycast://extensions/tolgaerdonmez/haiku-rag/search-documents'`.
   Add it to Karabiner's `assets/complex_modifications` and enable it (a
   configuration manager can merge it into the selected profile's
-  `complex_modifications.rules`). The first time Raycast receives the link
+  `complex_modifications.rules`; the installer's `hotkey` component does
+  that). The first time Raycast receives the link
   from outside it may ask to confirm opening the command.
 - **Once, in Raycast's settings.** Raycast Settings → Extensions → Haiku RAG →
   Search Documents → Record Hotkey, then press ⌘⇧F. Raycast's settings
@@ -104,7 +106,7 @@ backstop.
 ## Development
 
 ```bash
-cd clients/raycast
+cd raycast
 npm install
 npm run dev        # ray develop: loads the extension into Raycast until you stop it
 npm test           # vitest: coordinate mapping, opener dispatch, scripts, client

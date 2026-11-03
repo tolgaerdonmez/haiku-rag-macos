@@ -171,6 +171,42 @@ install_config() {
     fi
 }
 
+# An index written by haiku.rag's in-process coreml embedder (an earlier version of
+# this setup) holds the very vectors the embedding server gives for the same
+# model: record the server as its embedder, re-embedding nothing. Any other
+# embedder change is left to haiku.rag, which refuses to write to the index.
+adopt_embedder() {
+    found=$(HAIKU_RAG_CONFIG_PATH="$app/haiku.rag.yaml" "$env/bin/python" - <<'EOF'
+import json, os
+import lancedb
+from haiku.rag.config import get_config
+
+model = get_config().embeddings.model
+for name, path in (get_config().lancedb.databases or {}).items():
+    path = os.path.expandvars(str(path))
+    if not os.path.isdir(path):
+        continue
+    db = lancedb.connect(path)
+    if "settings" not in db.list_tables().tables:
+        continue
+    rows = db.open_table("settings").search().where("id = 'settings'").limit(1).to_list()
+    recorded = json.loads(rows[0]["settings"]).get("embeddings", {}).get("model", {}) if rows else {}
+    if (
+        recorded.get("provider") == "coreml"
+        and recorded.get("vector_dim") == model.vector_dim
+        and recorded.get("query_prefix", "") == model.query_prefix
+        and recorded.get("document_prefix", "") == model.document_prefix
+        and os.path.basename(str(recorded.get("name", "")).rstrip("/")) == "jina-nano-coreml"
+    ):
+        print(name)
+EOF
+    ) || die "could not read the index's recorded embedder"
+    [ -n "$found" ] || return 0
+    say "Index ($(printf '%s' "$found" | tr '\n' ' ' | sed 's/ $//')): written by the in-process coreml embedder;"
+    say "  recording the embedding server as its embedder (the same model and vectors: nothing is re-embedded)"
+    HAIKU_RAG_CONFIG_PATH="$app/haiku.rag.yaml" "$env/bin/haiku-rag" rebuild --set-embedder >/dev/null
+}
+
 install_model() {
     if [ -n "${model_from:-}" ]; then
         [ -e "$model_from/model.mlpackage" ] && [ -e "$model_from/tokenizer.json" ] \
@@ -331,6 +367,7 @@ install_all() {
     install_launcher
     install -m 755 "$rendered/bin/haiku-rag-serve" "$service/bin/haiku-rag-serve"
     install_config
+    adopt_embedder
     install_model
     [ -f "$embed_plist" ] || say "Embedding server: not installed; the service embeds with it. Install it: $0 embedder"
     install -m 644 "$rendered/com.haiku-rag.service.plist" "$plist"
