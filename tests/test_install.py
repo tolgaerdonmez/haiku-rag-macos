@@ -12,10 +12,18 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALLER = ROOT / "scripts" / "install-macos.sh"
-MENU = ROOT / "scripts" / "install-macos-tui.py"
-SERVICE = ROOT / "scripts" / "macos-service.sh"
+INSTALLER = ROOT / "install.sh"
+MENU = ROOT / "scripts" / "install-tui.py"
+SERVICE = ROOT / "scripts" / "service.sh"
+BUILD = ROOT / "service" / "build.sh"
 RULE = "Cmd+Shift+F opens haiku.rag Search Documents in Raycast"
+# Agents a test may load under its throwaway HOME, beside the real ones.
+TEST_ENV = {
+    "HAIKU_RAG_SERVICE_LABEL": "com.haiku-rag.service.pytest",
+    "HAIKU_RAG_SERVICE_PORT": "18799",
+    "HAIKU_RAG_EMBED_LABEL": "com.haiku-rag.ane-server.pytest",
+    "HAIKU_RAG_EMBED_PORT": "18798",
+}
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell scripts")
 macos_only = pytest.mark.skipif(sys.platform != "darwin", reason="macOS installer")
@@ -23,13 +31,7 @@ macos_only = pytest.mark.skipif(sys.platform != "darwin", reason="macOS installe
 
 def run(home: Path, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
     """The installer under a throwaway HOME and agent label, without a terminal."""
-    environment = {
-        **os.environ,
-        "HOME": str(home),
-        "HAIKU_RAG_SERVICE_LABEL": "com.haiku-rag.service.pytest",
-        "HAIKU_RAG_SERVICE_PORT": "18799",
-        **env,
-    }
+    environment = {**os.environ, "HOME": str(home), **TEST_ENV, **env}
     return subprocess.run(
         ["/bin/sh", str(INSTALLER), *args],
         env=environment,
@@ -55,8 +57,7 @@ class Terminal:
         environment = {
             **os.environ,
             "HOME": str(home),
-            "HAIKU_RAG_SERVICE_LABEL": "com.haiku-rag.service.pytest",
-            "HAIKU_RAG_SERVICE_PORT": "18799",
+            **TEST_ENV,
             "TERM": "xterm-256color",
             **env,
         }
@@ -127,7 +128,7 @@ def menu_module():
 MENU_SPEC = """dry_run=1
 home=/Users/me
 component=service\t1\t1\tBackground search service\t\t
-component=model\t1\t1\tCore ML embedding model\t\tinstalled
+component=model\t1\t1\tEmbedding model and its Neural Engine server\t\tinstalled
 component=raycast\t0\t0\tRaycast extension\tRaycast is not installed\t
 component=folders\t1\t1\tFolders to index\t\t
 component=fda\t1\t1\tOpen Full Disk Access afterwards\t\t
@@ -162,9 +163,58 @@ def fake_model_repo(root: Path) -> tuple[str, str]:
     return root.as_uri(), hashlib.sha256(sums.encode()).hexdigest()
 
 
-@pytest.mark.parametrize("script", [INSTALLER, SERVICE])
+@pytest.fixture
+def unload_test_agents():
+    """Boots out the agents a test loaded, whatever happened."""
+    yield
+    uid = os.getuid()
+    for key in ("HAIKU_RAG_SERVICE_LABEL", "HAIKU_RAG_EMBED_LABEL"):
+        subprocess.run(
+            ["/bin/launchctl", "bootout", f"gui/{uid}/{TEST_ENV[key]}"],
+            capture_output=True,
+        )
+
+
+@pytest.mark.parametrize("script", [INSTALLER, SERVICE, BUILD])
 def test_scripts_parse(script):
     subprocess.run(["/bin/sh", "-n", str(script)], check=True)
+
+
+@macos_only
+def test_build_renders_both_agents_and_the_openai_embedder(tmp_path):
+    out = tmp_path / "out"
+    app = tmp_path / "app"
+    subprocess.run(
+        [
+            "/bin/sh", str(BUILD), "--out", str(out), "--ingester", "/x/haiku-ingester",
+            "--ane-server", "/x/haiku-rag-ane-server", "--app-dir", str(app),
+            "--port", "18799", "--embed-port", "18798", "--idle-exit", "42",
+        ],
+        check=True,
+        capture_output=True,
+    )  # fmt: skip
+    config = (out / "haiku.rag.yaml").read_text(encoding="utf-8")
+    assert "provider: openai" in config
+    assert "base_url: http://127.0.0.1:18798/v1" in config
+    assert "vector_dim: 768" in config
+    assert 'query_prefix: "Query: "' in config
+    assert 'document_prefix: "Document: "' in config
+    assert "chunk_size: 1024" in config
+    assert "port: 18799" in config
+    assert "@" not in config
+    ane = (out / "com.haiku-rag.ane-server.plist").read_text(encoding="utf-8")
+    for text in (
+        "<string>/x/haiku-rag-ane-server</string>",
+        f"<string>{app}/models/jina-nano-coreml</string>",
+        "<string>42</string>",
+        "<string>18798</string>",
+        f"<string>{app}/ane-server/ane-server.log</string>",
+    ):
+        assert text in ane
+    assert "<key>RunAtLoad</key>" not in ane and "<key>KeepAlive</key>" not in ane
+    assert (out / "launcher.c.sha256").read_text().strip() == hashlib.sha256(
+        (ROOT / "service" / "launcher.c").read_bytes()
+    ).hexdigest()
 
 
 @macos_only
@@ -202,7 +252,8 @@ def test_dry_run_prints_the_plan_and_changes_nothing(tmp_path):
 
 
 @macos_only
-def test_model_downloads_and_verifies_every_file(tmp_path):
+@pytest.mark.integration
+def test_model_downloads_and_verifies_every_file(tmp_path, unload_test_agents):
     endpoint, sums = fake_model_repo(tmp_path / "hf")
     home = tmp_path / "home"
     home.mkdir()
@@ -219,6 +270,11 @@ def test_model_downloads_and_verifies_every_file(tmp_path):
     ).read_bytes() == b"\0" * 64
     assert (model / "tokenizer.json").exists()
     assert not (model / "SHA256SUMS").exists()
+    # The model's server comes with it, waiting for its first request.
+    server = app_dir(home) / "ane-server" / "env" / "bin" / "haiku-rag-ane-server"
+    assert server.exists()
+    plist = home / "Library" / "LaunchAgents" / "com.haiku-rag.ane-server.pytest.plist"
+    assert str(server) in plist.read_text(encoding="utf-8")
 
 
 @macos_only
@@ -253,6 +309,8 @@ def test_uninstall_keeps_the_index_and_indexed_files(tmp_path):
         "haiku.rag.yaml",
         "models/jina-nano-coreml/tokenizer.json",
         "service/bin/haiku-rag-service",
+        "service/haiku.rag/pyproject.toml",
+        "ane-server/env/bin/haiku-rag-ane-server",
         "raycast/package.json",
     ):
         (app / path).parent.mkdir(parents=True, exist_ok=True)

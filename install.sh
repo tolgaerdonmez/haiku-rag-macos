@@ -1,18 +1,18 @@
 #!/bin/sh
 # Install haiku.rag's local search on macOS: asks what to install, then installs it.
 #
-#   curl -fsSL https://raw.githubusercontent.com/tolgaerdonmez/haiku.rag/main/scripts/install-macos.sh | sh
-#   scripts/install-macos.sh [--yes] [--dry-run] [component options]
-#   scripts/install-macos.sh --uninstall [--yes] [--delete-index] [--keep-model]
+#   curl -fsSL https://raw.githubusercontent.com/tolgaerdonmez/haiku-rag-macos/main/install.sh | sh
+#   ./install.sh [--yes] [--dry-run] [component options]
+#   ./install.sh --uninstall [--yes] [--delete-index] [--keep-model]
 #
 # Components (recommended ones are preselected):
 #   --service / --no-service   background search service: launchd agent and launcher
-#   --model / --no-model       Core ML embedding model, run on the Neural Engine
+#   --model / --no-model       embedding model and the server running it on the Neural Engine
 #   --raycast / --no-raycast   Raycast extension (recommended when Raycast is installed)
 #   --hotkey / --no-hotkey     Cmd+Shift+F through Karabiner-Elements (offered when installed)
 #   --folder PATH              register PATH for indexing (repeatable)
 #   --no-folders               do not ask for folders to index
-# The model (downloaded from Hugging Face; haiku.rag holds no conversion code):
+# The model (downloaded from Hugging Face; this repository holds no conversion code):
 #   --model-repo ID            Hugging Face model repository to download from
 #   --model-revision REV       its branch, tag or commit (default main)
 #   --model-sha256 HEX         checksum of the repository's SHA256SUMS
@@ -25,32 +25,35 @@
 #                              kept unless --delete-index, indexed files are never touched
 #
 # Run from a checkout it installs that checkout. Run on its own (piped to sh) it
-# clones the fork, or updates the clone, in HAIKU_RAG_SOURCE (default
+# clones this repository, or updates the clone, in HAIKU_RAG_MACOS_SOURCE (default
 # ~/Library/Application Support/haiku.rag/source) and runs the installer found
-# there. HAIKU_RAG_REPO and HAIKU_RAG_REF pick another repository or branch,
-# HAIKU_RAG_MODEL_REPO another model repository and HF_ENDPOINT another Hugging
-# Face host. Prompts read the terminal, so they work when the script itself
-# arrives on stdin. The menu is scripts/install-macos-tui.py, run with uv; without
-# uv, without a terminal it can draw on, or with HAIKU_RAG_TUI=0, a numbered menu
-# asks instead.
+# there. HAIKU_RAG_MACOS_REPO and HAIKU_RAG_MACOS_REF pick another repository or
+# branch, HAIKU_RAG_MODEL_REPO another model repository and HF_ENDPOINT another
+# Hugging Face host. haiku.rag itself is fetched at the commit scripts/service.sh
+# pins. Prompts read the terminal, so they work when the script itself arrives on
+# stdin. The menu is scripts/install-tui.py, run with uv; without uv, without a
+# terminal it can draw on, or with HAIKU_RAG_TUI=0, a numbered menu asks instead.
 set -eu
 
-repo_url=${HAIKU_RAG_REPO:-https://github.com/tolgaerdonmez/haiku.rag.git}
-repo_ref=${HAIKU_RAG_REF:-main}
+repo_url=${HAIKU_RAG_MACOS_REPO:-https://github.com/tolgaerdonmez/haiku-rag-macos.git}
+repo_ref=${HAIKU_RAG_MACOS_REF:-main}
 hf_endpoint=${HF_ENDPOINT:-https://huggingface.co}
 default_model_repo=tolgaerdonmez/jina-embeddings-v5-omni-nano-coreml
-# The SHA256SUMS of default_model_repo at main, written by scripts/package-coreml-model.sh.
+# The SHA256SUMS of default_model_repo at main, written by the repository's packaging script.
 default_model_sums=122dfdf9d6d4197477195b513c4bb0e2114b25533fc6c3a3ce983a17f4b79af7
 
-[ -n "${HOME:-}" ] || { echo "install-macos: HOME is not set" >&2; exit 1; }
+[ -n "${HOME:-}" ] || { echo "haiku-rag-macos: HOME is not set" >&2; exit 1; }
 app="$HOME/Library/Application Support/haiku.rag"
-source_dir=${HAIKU_RAG_SOURCE:-$app/source}
+source_dir=${HAIKU_RAG_MACOS_SOURCE:-$app/source}
 model="$app/models/jina-nano-coreml"
 launcher="$app/service/bin/haiku-rag-service"
 env="$app/service/env"
+ane="$app/ane-server"
 label=${HAIKU_RAG_SERVICE_LABEL:-com.haiku-rag.service}
 port=${HAIKU_RAG_SERVICE_PORT:-8765}
 plist="$HOME/Library/LaunchAgents/$label.plist"
+embed_label=${HAIKU_RAG_EMBED_LABEL:-com.haiku-rag.ane-server}
+embed_plist="$HOME/Library/LaunchAgents/$embed_label.plist"
 raycast_ext="$HOME/.config/raycast/extensions/haiku-rag"
 karabiner_json="$HOME/.config/karabiner/karabiner.json"
 karabiner_rule="Cmd+Shift+F opens haiku.rag Search Documents in Raycast"
@@ -60,7 +63,7 @@ excludes=".* *.json *.yaml *.yml"
 say() { printf '%s\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*"; }
-die() { printf 'install-macos: %s\n' "$*" >&2; exit 1; }
+die() { printf 'haiku-rag-macos: %s\n' "$*" >&2; exit 1; }
 heading() { printf '\n%s\n' "$*"; }
 
 # --- options -----------------------------------------------------------------
@@ -121,7 +124,7 @@ parse_options() {
                 [ $# -ge 2 ] || die "--model-from needs a directory"
                 model_from=$2; shift ;;
             -h | --help) usage 0 ;;
-            *) say "install-macos: unknown option: $1" >&2; usage 64 ;;
+            *) say "haiku-rag-macos: unknown option: $1" >&2; usage 64 ;;
         esac
         shift
     done
@@ -131,7 +134,7 @@ usage() {
     if [ -f "${0:-}" ]; then
         sed -n '2,/^set -eu$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2
     else
-        say "See the header of scripts/install-macos.sh for its options." >&2
+        say "See the header of install.sh for its options." >&2
     fi
     exit "$1"
 }
@@ -198,10 +201,18 @@ check_command_line_tools() {
 bootstrap() {
     check_platform
     check_command_line_tools
-    say "haiku.rag: fetching $repo_url ($repo_ref) into $source_dir"
+    say "haiku-rag-macos: fetching $repo_url ($repo_ref) into $source_dir"
     if [ -d "$source_dir/.git" ]; then
         [ -z "$(git -C "$source_dir" status --porcelain)" ] \
-            || die "$source_dir has local changes; commit or remove them, or set HAIKU_RAG_SOURCE"
+            || die "$source_dir has local changes; commit or remove them, or set HAIKU_RAG_MACOS_SOURCE"
+        # An earlier installer cloned haiku.rag itself here: replace that clone.
+        if [ "$(git -C "$source_dir" config --get remote.origin.url || true)" != "$repo_url" ] \
+            && [ -f "$source_dir/haiku_rag_slim/pyproject.toml" ]; then
+            say "  replacing the haiku.rag clone an earlier installer made there"
+            rm -rf "$source_dir"
+        fi
+    fi
+    if [ -d "$source_dir/.git" ]; then
         git -C "$source_dir" fetch --quiet --depth 1 "$repo_url" "$repo_ref"
         git -C "$source_dir" checkout --quiet --detach FETCH_HEAD
     else
@@ -209,21 +220,21 @@ bootstrap() {
         mkdir -p "$(dirname "$source_dir")"
         git clone --quiet --depth 1 --branch "$repo_ref" "$repo_url" "$source_dir"
     fi
-    [ -f "$source_dir/scripts/install-macos.sh" ] || die "$repo_url ($repo_ref) has no scripts/install-macos.sh"
-    HAIKU_RAG_SOURCE=$source_dir
-    export HAIKU_RAG_SOURCE
-    exec /bin/sh "$source_dir/scripts/install-macos.sh" "$@"
+    [ -f "$source_dir/install.sh" ] || die "$repo_url ($repo_ref) has no install.sh"
+    HAIKU_RAG_MACOS_SOURCE=$source_dir
+    export HAIKU_RAG_MACOS_SOURCE
+    exec /bin/sh "$source_dir/install.sh" "$@"
 }
 
 repo=
 if [ -f "${0:-}" ]; then
     here=$(cd "$(dirname "$0")" && pwd)
-    if [ -f "$here/macos-service.sh" ] && [ -f "$here/../service/macos/build.sh" ]; then
-        repo=$(cd "$here/.." && pwd)
+    if [ -f "$here/scripts/service.sh" ] && [ -f "$here/service/build.sh" ]; then
+        repo=$here
     fi
 fi
 [ -n "$repo" ] || bootstrap "$@"
-service_sh="$repo/scripts/macos-service.sh"
+service_sh="$repo/scripts/service.sh"
 
 # --- what is on this Mac -----------------------------------------------------
 
@@ -256,6 +267,7 @@ detect() {
 
 service_installed() { [ -f "$plist" ] && [ -x "$env/bin/haiku-ingester" ]; }
 model_installed() { [ -e "$model/model.mlpackage" ] && [ -e "$model/tokenizer.json" ]; }
+embedder_installed() { model_installed && [ -f "$embed_plist" ] && [ -x "$ane/env/bin/haiku-rag-ane-server" ]; }
 raycast_installed() { [ -f "$raycast_ext/package.json" ]; }
 hotkey_installed() { [ -f "$karabiner_json" ] && grep -qF "$karabiner_rule" "$karabiner_json"; }
 
@@ -304,10 +316,11 @@ ensure_uv() {
 # --- choosing components -----------------------------------------------------
 
 # Sizes in KB: the service's environment, the installed model and its download,
-# and the Raycast extension's working copy and build.
+# the embedding server's environment, and the Raycast extension's working copy and build.
 size_service=2000000
 size_model=870000
 size_model_download=430000
+size_ane=120000
 size_raycast=150000
 
 available() {
@@ -351,8 +364,8 @@ apply_defaults() {
 describe() {
     case "$1" in
         service) printf 'Background search service: launchd agent, launcher, Python env (%s)' "$(human_kb $size_service)" ;;
-        model) printf 'Core ML embedding model for the Neural Engine (%s, %s download)' \
-            "$(human_kb $size_model)" "$(human_kb $size_model_download)" ;;
+        model) printf 'Embedding model and its Neural Engine server (%s, %s download)' \
+            "$(human_kb $((size_model + size_ane)))" "$(human_kb $size_model_download)" ;;
         raycast) printf 'Raycast extension: Search Documents, Manage Indexed Folders (%s)' "$(human_kb $size_raycast)" ;;
         hotkey) printf 'Cmd+Shift+F opens the search, through Karabiner (takes Cmd+Shift+F from other apps)' ;;
         folders) printf 'Folders to index, asked next' ;;
@@ -363,7 +376,7 @@ describe() {
 installed_mark() {
     case "$1" in
         service) service_installed && printf ' (installed)' ;;
-        model) model_installed && printf ' (installed)' ;;
+        model) embedder_installed && printf ' (installed)' ;;
         raycast) raycast_installed && printf ' (installed)' ;;
         hotkey) hotkey_installed && printf ' (installed)' ;;
         folders) service_installed && printf ' (%s registered)' "$(registered_folders | grep -c . || true)" ;;
@@ -389,7 +402,7 @@ show_menu() {
 
 # --- the menu ----------------------------------------------------------------
 
-# The facts the menu shows, as key=value lines (see install-macos-tui.py).
+# The facts the menu shows, as key=value lines (see scripts/install-tui.py).
 tui_spec() {
     printf 'dry_run=%s\nhome=%s\nhf_endpoint=%s\n' "$dry_run" "$HOME" "$hf_endpoint"
     if [ -x "$launcher" ]; then fda_default=0; else fda_default=1; fi
@@ -433,7 +446,7 @@ read_tui_result() {
 # fails when it cannot run.
 run_tui() {
     [ "${HAIKU_RAG_TUI:-1}" != 0 ] || return 1
-    tui="$repo/scripts/install-macos-tui.py"
+    tui="$repo/scripts/install-tui.py"
     [ -f "$tui" ] || return 1
     if [ "$has_uv" = 0 ]; then
         note "(uv is not installed yet, so a numbered menu asks)"
@@ -487,6 +500,7 @@ check_space() {
     if [ "$want_model" = 1 ] && ! model_installed; then
         need=$((need + size_model + size_model_download))
     fi
+    [ "$want_model" = 0 ] || embedder_installed || need=$((need + size_ane))
     [ "$want_raycast" = 0 ] || raycast_installed || need=$((need + size_raycast))
     [ "$need" -gt 0 ] || return 0
     note "Needs about $(human_kb $need) of disk, $(human_kb "$free_kb") free; the index grows with the documents."
@@ -649,15 +663,21 @@ install_steps() {
         fetch_model
     fi
     [ "$want_raycast" = 0 ] || start_raycast
+    if [ "$want_model" = 1 ]; then
+        heading "Embedding server"
+        if [ -n "$model_dir" ]; then
+            run_service embedder --model-from "$model_dir"
+        else
+            run_service embedder
+        fi
+    fi
     if [ "$want_service" = 1 ]; then
         heading "Service"
         set -- install
-        [ -z "$model_dir" ] || set -- "$@" --model-from "$model_dir"
         [ "$want_raycast" = 1 ] || set -- "$@" --no-raycast
         [ "$want_hotkey" = 1 ] || set -- "$@" --no-karabiner
         run_service "$@"
     else
-        [ -z "$model_dir" ] || run_service model "$model_dir"
         if [ "$want_raycast" = 1 ]; then heading "Raycast"; run_service raycast; fi
         if [ "$want_hotkey" = 1 ]; then heading "Hotkey"; run_service karabiner; fi
     fi
@@ -741,8 +761,8 @@ summary() {
         note "Pause:      $service_sh pause    (resume: $service_sh resume)"
         note "Status:     $service_sh status    (log: $service_sh logs)"
     fi
-    note "Uninstall:  $repo/scripts/install-macos.sh --uninstall"
-    note "Docs:       docs/local-service-macos.md"
+    note "Uninstall:  $repo/install.sh --uninstall"
+    note "Docs:       https://github.com/tolgaerdonmez/haiku-rag-macos#readme"
 }
 
 install() {
@@ -812,8 +832,8 @@ EOF
 
 uninstall() {
     heading "Uninstall"
-    note "Removes the agent, launcher, Python environment, configuration, Raycast extension,"
-    note "Cmd+Shift+F rule$( [ "$keep_model" = 1 ] || printf ', model') and the fetched source in $app."
+    note "Removes the agents, launcher, Python environments, embedding server, configuration,"
+    note "Raycast extension, Cmd+Shift+F rule$( [ "$keep_model" = 1 ] || printf ', model') and the fetched sources in $app."
     note "Indexed folders and their files are never touched."
     if [ "$interactive" = 1 ]; then
         ask "Uninstall?" y || exit 0
@@ -823,9 +843,9 @@ uninstall() {
     [ "$dry_run" = 0 ] || { note "Dry run: nothing changed"; return 0; }
 
     remove_hotkey
-    if [ -f "$plist" ] || [ -d "$env" ]; then
+    if [ -f "$plist" ] || [ -d "$env" ] || [ -f "$embed_plist" ] || [ -d "$ane" ]; then
         run_service uninstall >/dev/null
-        note "Agent and Python environment removed"
+        note "Agents, embedding server and Python environments removed"
     fi
     rm -f "$launcher" "$app/service/bin/.launcher.c.sha256" "$app/service/bin/haiku-rag-serve" \
         "$app/service/service.log"

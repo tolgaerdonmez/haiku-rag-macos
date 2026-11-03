@@ -1,11 +1,12 @@
 #!/bin/sh
-# The command the launcher runs. Without the embedding model it exits
-# successfully, which KeepAlive does not restart: indexing needs the model.
+# The command the launcher runs. Without the embedding model, which the Neural
+# Engine embedding server serves, it exits successfully, which KeepAlive does
+# not restart: indexing needs the model.
 # exec keeps haiku-ingester the launcher's child, holding its Full Disk Access;
 # HAIKU_RAG_LISTEN_FD passes through.
 model='@MODEL_DIR@'
 if [ ! -e "$model/model.mlpackage" ] || [ ! -e "$model/tokenizer.json" ]; then
-    echo "haiku-rag-serve: no Core ML model in $model; not starting." >&2
+    echo "haiku-rag-serve: no embedding model in $model; not starting." >&2
     exit 0
 fi
 exec '@INGESTER@' --config '@CONFIG@' serve

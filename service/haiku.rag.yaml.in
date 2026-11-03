@@ -1,7 +1,8 @@
-# The local search service's configuration, installed as-is to
+# The local search service's configuration, rendered by service/build.sh to
 # ~/Library/Application Support/haiku.rag/haiku.rag.yaml. Paths use ${HOME} and
-# are absolute, so the file also works as a symlink. The coreml model directory
-# holds model.mlpackage and tokenizer.json (scripts/install-macos.sh downloads it).
+# are absolute, so the file also works as a symlink. Embeddings come from the
+# Neural Engine embedding server (ane-server/, its own launchd agent), which
+# serves the Core ML model in models/jina-nano-coreml on an OpenAI-compatible API.
 environment: production
 storage:
   data_dir: ${HOME}/Library/Application Support/haiku.rag
@@ -11,8 +12,9 @@ lancedb:
   read_consistency_interval_seconds: 2
 embeddings:
   model:
-    provider: coreml              # the Neural Engine, in-process
-    name: ${HOME}/Library/Application Support/haiku.rag/models/jina-nano-coreml
+    provider: openai              # the Neural Engine embedding server
+    name: jina-embeddings-v5-omni-nano
+    base_url: http://127.0.0.1:@EMBED_PORT@/v1   # the server's socket in com.haiku-rag.ane-server.plist.in
     vector_dim: 768
     query_prefix: "Query: "
     document_prefix: "Document: "
@@ -41,7 +43,7 @@ ingester:
     poll_idle_interval_s: 5
   api:
     host: 127.0.0.1
-    port: 8765                    # the agent's socket in com.haiku-rag.service.plist.in
+    port: @PORT@                  # the agent's socket in com.haiku-rag.service.plist.in
   service:
     search_idle_s: 300            # unload the search client after 5 idle minutes
     idle_exit_s: 1800             # exit after 30 idle minutes; launchd restarts on demand

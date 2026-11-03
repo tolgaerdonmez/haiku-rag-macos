@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>@EMBED_LABEL@</string>
+
+    <!-- The Neural Engine embedding server haiku.rag embeds with
+         (embeddings.model.provider: openai). -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>@ANE_SERVER@</string>
+        <string>--model</string>
+        <string>@MODEL_DIR@</string>
+        <string>--idle-exit</string>
+        <string>@IDLE_EXIT@</string>
+    </array>
+
+    <!-- launchd listens on the port and starts the server on the first
+         connection, which serves this socket. Idle for IDLE_EXIT seconds it
+         releases the model and exits; the next connection starts it again.
+         Neither RunAtLoad nor KeepAlive: it runs only while it is asked. -->
+    <key>Sockets</key>
+    <dict>
+        <key>Listeners</key>
+        <dict>
+            <key>SockNodeName</key>
+            <string>127.0.0.1</string>
+            <key>SockServiceName</key>
+            <string>@EMBED_PORT@</string>
+            <key>SockFamily</key>
+            <string>IPv4</string>
+            <key>SockType</key>
+            <string>stream</string>
+        </dict>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Standard</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>@HOME@</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>@ANE_DIR@</string>
+    <key>StandardOutPath</key>
+    <string>@ANE_DIR@/ane-server.log</string>
+    <key>StandardErrorPath</key>
+    <string>@ANE_DIR@/ane-server.log</string>
+</dict>
+</plist>

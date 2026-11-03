@@ -7,9 +7,9 @@
 # ]
 # ///
 #
-# The menu of scripts/install-macos.sh, run by it with `uv run --script`:
+# The menu of install.sh, run by it with `uv run --script`:
 #
-#   install-macos-tui.py SPEC RESULT
+#   install-tui.py SPEC RESULT
 #
 # SPEC holds what the installer found, RESULT receives what was chosen. Both are
 # key=value lines; a component line is `component=` and tab-separated fields:
