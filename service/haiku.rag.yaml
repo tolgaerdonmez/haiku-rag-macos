@@ -1,0 +1,55 @@
+# The local search service's configuration, installed as-is to
+# ~/Library/Application Support/haiku.rag/haiku.rag.yaml. Paths use ${HOME} and
+# are absolute, so the file also works as a symlink. The coreml model directory
+# holds model.mlpackage and tokenizer.json (scripts/install-macos.sh downloads it).
+environment: production
+storage:
+  data_dir: ${HOME}/Library/Application Support/haiku.rag
+lancedb:
+  databases:
+    files: ${HOME}/Library/Application Support/haiku.rag/files.lancedb
+  read_consistency_interval_seconds: 2
+embeddings:
+  model:
+    provider: coreml              # the Neural Engine, in-process
+    name: ${HOME}/Library/Application Support/haiku.rag/models/jina-nano-coreml
+    vector_dim: 768
+    query_prefix: "Query: "
+    document_prefix: "Document: "
+processing:
+  chunk_size: 1024                # the model's longest function is 2048 tokens
+  pictures: none
+  extract_pdf_attachments: false  # PowerPoint PDFs embed their equations as MathML .xml files
+  conversion_options:
+    ocr_engine: ocrmac            # Apple Vision; RapidOCR is the retry
+    table_mode: fast
+    generate_page_images: false
+  supervisor:
+    enabled: true
+    workers: 8                    # sized for the first full index; ~2-3 GB each
+    threads_per_worker: 2
+    background: false             # performance cores; Nice 10 and the throttle spare the machine
+    unit_timeout: 300
+    page_batch: 20
+    retry_ocr_engine: rapidocr
+ingester:
+  folders_register: ${HOME}/Library/Application Support/haiku.rag/folders.yaml
+  queue:
+    path: ${HOME}/Library/Application Support/haiku.rag/ingester.db
+  workers:
+    worker_count: 8               # one per conversion process
+    poll_idle_interval_s: 5
+  api:
+    host: 127.0.0.1
+    port: 8765                    # the agent's socket in com.haiku-rag.service.plist.in
+  service:
+    search_idle_s: 300            # unload the search client after 5 idle minutes
+    idle_exit_s: 1800             # exit after 30 idle minutes; launchd restarts on demand
+    throttle:
+      on_battery: pause
+      max_load: 1.2               # per core, sized for 8 conversion processes of 2 threads
+      min_free_memory_percent: 10
+    vacuum_after_indexing:
+      min_documents: 50           # once the queue drains after this many documents; null never
+      quiet_s: 60
+      retention_seconds: 0        # drop every old version, so the index shrinks to its live size

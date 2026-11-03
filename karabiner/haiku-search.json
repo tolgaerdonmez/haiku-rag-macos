@@ -1,0 +1,28 @@
+{
+  "title": "haiku.rag search on Cmd+Shift+F",
+  "rules": [
+    {
+      "description": "Cmd+Shift+F opens haiku.rag Search Documents in Raycast",
+      "description_notes": [
+        "Opens raycast://extensions/tolgaerdonmez/haiku-rag/search-documents.",
+        "Global: Cmd+Shift+F no longer reaches other apps, such as Find in Files in VS Code or Recents in Finder."
+      ],
+      "manipulators": [
+        {
+          "type": "basic",
+          "from": {
+            "key_code": "f",
+            "modifiers": {
+              "mandatory": ["command", "shift"]
+            }
+          },
+          "to": [
+            {
+              "shell_command": "open 'raycast://extensions/tolgaerdonmez/haiku-rag/search-documents'"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

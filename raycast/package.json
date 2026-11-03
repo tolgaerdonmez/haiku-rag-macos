@@ -1,0 +1,131 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "haiku-rag",
+  "title": "Haiku RAG",
+  "description": "Search your own files by meaning and open the exact page and passage.",
+  "icon": "extension-icon.png",
+  "author": "tolgaerdonmez",
+  "categories": [
+    "Productivity",
+    "Developer Tools"
+  ],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "search-documents",
+      "title": "Search Documents",
+      "subtitle": "haiku.rag",
+      "description": "Search the indexed folders and open a result at the exact spot.",
+      "mode": "view"
+    },
+    {
+      "name": "manage-folders",
+      "title": "Manage Indexed Folders",
+      "subtitle": "haiku.rag",
+      "description": "List, add and remove the folders haiku.rag indexes.",
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "serviceUrl",
+      "title": "Search Service URL",
+      "description": "Base URL of the local haiku.rag search service.",
+      "type": "textfield",
+      "required": false,
+      "default": "http://127.0.0.1:8765"
+    },
+    {
+      "name": "serviceToken",
+      "title": "Service Token",
+      "description": "Bearer token, when the service sets ingester.api.auth_token.",
+      "type": "password",
+      "required": false
+    },
+    {
+      "name": "useMockData",
+      "title": "Mock Data",
+      "label": "Use built-in sample results instead of the service",
+      "description": "For development without a running search service.",
+      "type": "checkbox",
+      "required": false,
+      "default": false
+    },
+    {
+      "name": "resultLimit",
+      "title": "Result Limit",
+      "description": "How many passages to fetch per query, grouped by file (at most 50).",
+      "type": "textfield",
+      "required": false,
+      "default": "50"
+    },
+    {
+      "name": "rexPath",
+      "title": "Rex CLI",
+      "description": "Path to the rex command used to open text files in Neovim. Empty finds the CLI bundled with Rex.",
+      "type": "textfield",
+      "required": false,
+      "default": ""
+    },
+    {
+      "name": "rexSession",
+      "title": "Rex Session",
+      "description": "Rex session that receives the Neovim tabs; created when missing.",
+      "type": "textfield",
+      "required": false,
+      "default": "haiku"
+    },
+    {
+      "name": "editorCommand",
+      "title": "Editor",
+      "description": "Editor started in the Rex tab, run through your login shell.",
+      "type": "textfield",
+      "required": false,
+      "default": "nvim"
+    },
+    {
+      "name": "openRouterApiKey",
+      "title": "OpenRouter API Key",
+      "description": "Used only by \"Ask About This Result\".",
+      "type": "password",
+      "required": false
+    },
+    {
+      "name": "askModel",
+      "title": "Ask Model",
+      "description": "OpenRouter model id for \"Ask About This Result\".",
+      "type": "textfield",
+      "required": false,
+      "default": "google/gemini-2.5-flash-lite"
+    },
+    {
+      "name": "monthlySpendCapUsd",
+      "title": "Monthly Spending Cap (USD)",
+      "description": "Asking stops once this month's OpenRouter spend reaches the cap.",
+      "type": "textfield",
+      "required": false,
+      "default": "1.00"
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^2.10.1",
+    "@raycast/utils": "^2.3.3"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^2.2.0",
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "eslint": "^9.39.4",
+    "prettier": "^3.6.2",
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "scripts": {
+    "build": "ray build -e dist -o dist",
+    "dev": "ray develop",
+    "fix-lint": "ray lint --fix",
+    "lint": "ray lint",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  }
+}

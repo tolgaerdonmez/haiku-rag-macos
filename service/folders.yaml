@@ -1,0 +1,11 @@
+# The folders haiku-ingester watches and indexes. Managed with
+# `haiku-rag folders`, the service API and MCP; hand edits are kept.
+# Installed only where no folders.yaml exists. A folder entry:
+#
+# - id: documents
+#   database: files
+#   path: /Users/me/Documents
+#   include: []
+#   exclude: [".*", "*.json", "*.yaml", "*.yml"]
+folders: []
+retired: []
