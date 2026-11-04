@@ -64,6 +64,13 @@
         <string>@HOME@</string>
         <key>HAIKU_RAG_CONFIG_PATH</key>
         <string>@CONFIG@</string>
+        <!-- Docling's layout and table models and the chunking tokenizer
+             download into a cache of this install's own, not the shared
+             ~/.cache/huggingface, so uninstalling with purge removes them. -->
+        <key>HF_HOME</key>
+        <string>@CACHE_DIR@/huggingface</string>
+        <key>DOCLING_CACHE_DIR</key>
+        <string>@CACHE_DIR@/docling</string>
     </dict>
     <key>WorkingDirectory</key>
     <string>@STATE_DIR@</string>

@@ -25,6 +25,8 @@
 # HAIKU_RAG_EMBED_PORT override the agents' labels and ports, so a test install
 # under another HOME runs beside the real one; HAIKU_RAG_EMBED_IDLE_EXIT is how
 # long the embedding server stays without a request (seconds, default 300).
+# uv's package cache and the models the service downloads live in
+# ~/Library/Caches/haiku.rag, not the caches shared with other tools.
 # install.sh is the interactive installer built on this script.
 set -eu
 
@@ -51,6 +53,10 @@ embed_plist="$HOME/Library/LaunchAgents/$embed_label.plist"
 embed_job="gui/$(id -u)/$embed_label"
 embed_port=${HAIKU_RAG_EMBED_PORT:-58741}
 idle_exit=${HAIKU_RAG_EMBED_IDLE_EXIT:-300}
+cache="$HOME/Library/Caches/haiku.rag"
+# This install's own package cache, which install.sh --uninstall --purge deletes.
+UV_CACHE_DIR="$cache/uv"
+export UV_CACHE_DIR
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'service: %s\n' "$*" >&2; exit 1; }
@@ -136,7 +142,7 @@ render() {
     rendered=$(mktemp -d)
     trap 'rm -rf "$rendered"' EXIT
     "$repo/service/build.sh" --out "$rendered" --ingester "$env/bin/haiku-ingester" \
-        --ane-server "$ane/env/bin/haiku-rag-ane-server" --app-dir "$app" \
+        --ane-server "$ane/env/bin/haiku-rag-ane-server" --app-dir "$app" --cache-dir "$cache" \
         --port "$port" --label "$label" --embed-port "$embed_port" \
         --embed-label "$embed_label" --idle-exit "$idle_exit" >/dev/null
 }
@@ -404,7 +410,10 @@ case "${1:-}" in
     logs)
         if [ "${2:-}" = embedder ]; then exec tail -n 100 -f "$ane/ane-server.log"; fi
         exec tail -n 100 -f "$service/service.log" ;;
-    cli) shift; HAIKU_RAG_CONFIG_PATH="$app/haiku.rag.yaml" exec "$env/bin/haiku-rag" "$@" ;;
+    cli)
+        shift
+        HAIKU_RAG_CONFIG_PATH="$app/haiku.rag.yaml" HF_HOME="$cache/huggingface" \
+            DOCLING_CACHE_DIR="$cache/docling" exec "$env/bin/haiku-rag" "$@" ;;
     raycast) install_raycast ;;
     karabiner) install_karabiner ;;
     uninstall)

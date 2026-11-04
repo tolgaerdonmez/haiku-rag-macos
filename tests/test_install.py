@@ -212,6 +212,10 @@ def test_build_renders_both_agents_and_the_openai_embedder(tmp_path):
     ):
         assert text in ane
     assert "<key>RunAtLoad</key>" not in ane and "<key>KeepAlive</key>" not in ane
+    service = (out / "com.haiku-rag.service.plist").read_text(encoding="utf-8")
+    cache = Path.home() / "Library" / "Caches" / "haiku.rag"
+    assert f"<key>HF_HOME</key>\n        <string>{cache}/huggingface</string>" in service
+    assert f"<key>DOCLING_CACHE_DIR</key>\n        <string>{cache}/docling</string>" in service
     assert (out / "launcher.c.sha256").read_text().strip() == hashlib.sha256(
         (ROOT / "service" / "launcher.c").read_bytes()
     ).hexdigest()
@@ -334,6 +338,81 @@ def test_uninstall_keeps_the_index_and_indexed_files(tmp_path):
     assert kept["profiles"][0]["complex_modifications"]["rules"] == [
         {"description": "another rule"}
     ]
+
+
+def fake_caches(home: Path) -> tuple[list[Path], list[Path]]:
+    """This install's caches, and files of other tools beside them."""
+    ours = [
+        home / "Library" / "Caches" / "haiku.rag" / "uv" / "wheels-v5" / "torch.whl",
+        home / "Library" / "Caches" / "haiku.rag" / "huggingface" / "hub" / "layout.bin",
+        home / "Library" / "Caches" / "haiku.rag" / "docling" / "models" / "ocr.onnx",
+        home / "Library" / "Application Support" / "com.raycast.macos" / "extensions"
+        / "haiku-rag" / "previews" / "pages" / "page.png",
+    ]  # fmt: skip
+    theirs = [
+        home / ".cache" / "uv" / "wheels-v5" / "torch.whl",
+        home / ".cache" / "huggingface" / "hub" / "models--docling-project--docling-models" / "x",
+        home / "Library" / "Caches" / "another-app" / "cache.db",
+        home / "Library" / "Application Support" / "com.raycast.macos" / "extensions"
+        / "another-extension" / "data.json",
+    ]  # fmt: skip
+    for path in ours + theirs:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\0" * 4096)
+    return ours, theirs
+
+
+@macos_only
+def test_uninstall_keeps_the_caches_without_purge(tmp_path):
+    home = tmp_path / "home"
+    ours, theirs = fake_caches(home)
+
+    result = run(home, "--uninstall", "--yes")
+
+    assert result.returncode == 0, result.stderr
+    assert all(path.exists() for path in ours + theirs)
+
+
+@macos_only
+def test_uninstall_purge_deletes_only_this_installs_caches(tmp_path):
+    home = tmp_path / "home"
+    ours, theirs = fake_caches(home)
+    (app_dir(home) / "haiku.rag.yaml").parent.mkdir(parents=True)
+    (app_dir(home) / "haiku.rag.yaml").write_text("x", encoding="utf-8")
+
+    result = run(home, "--uninstall", "--yes", "--purge")
+
+    assert result.returncode == 0, result.stderr
+    assert not (home / "Library" / "Caches" / "haiku.rag").exists()
+    raycast = home / "Library" / "Application Support" / "com.raycast.macos" / "extensions"
+    assert not (raycast / "haiku-rag").exists()
+    assert not any(path.exists() for path in ours)
+    assert all(path.exists() for path in theirs)
+
+
+@macos_only
+def test_dry_run_uninstall_lists_what_it_would_delete_with_sizes(tmp_path):
+    home = tmp_path / "home"
+    ours, theirs = fake_caches(home)
+    config = app_dir(home) / "haiku.rag.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("x", encoding="utf-8")
+    index = app_dir(home) / "files.lancedb"
+    index.mkdir()
+
+    result = run(home, "--uninstall", "--dry-run", "--purge")
+
+    assert result.returncode == 0, result.stderr
+    listed = dict(
+        reversed(line.strip().split("\t", 1))
+        for line in result.stdout.splitlines()
+        if "\t" in line
+    )
+    cache = home / "Library" / "Caches" / "haiku.rag"
+    previews = ours[-1].parents[2]
+    assert set(listed) == {str(config), str(cache), str(previews)}
+    assert re.fullmatch(r"\d+ KB", listed[str(cache)])
+    assert all(path.exists() for path in ours + theirs + [config, index])
 
 
 @macos_only
@@ -529,4 +608,7 @@ def test_menu_cancel_installs_nothing(tmp_path):
     terminal.send("\x03")
     assert terminal.wait() == 0
     assert "Cancelled: nothing changed." in terminal.text
-    assert not (tmp_path / "Library").exists()
+    # Only uv's cache for the menu, in the cache --purge deletes.
+    assert [p.relative_to(tmp_path) for p in (tmp_path / "Library").glob("*/*")] == [
+        Path("Library/Caches/haiku.rag")
+    ]

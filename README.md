@@ -89,6 +89,24 @@ deleting the index, the queue and the folder list, and keeps them by default
 the indexed folders or their files. Remove `haiku-rag-service` from
 System Settings > Privacy & Security > Full Disk Access yourself.
 
+The caches stay unless you add `--purge` (or answer yes when the uninstaller asks;
+the default is no): it also deletes `~/Library/Caches/haiku.rag`, where uv keeps
+the packages the Python environments were built from and the service keeps
+docling's layout and table models and the chunking tokenizer, and the Raycast
+extension's page previews in
+`~/Library/Application Support/com.raycast.macos/extensions/haiku-rag` (up to
+200 MB). The installer points uv and the service at that cache of their own
+because `~/.cache/uv` and `~/.cache/huggingface` are shared with other tools, so
+nothing there can be deleted as ours. An install made before this version
+downloaded into those shared caches; `--purge` leaves them alone (docling's models
+are `~/.cache/huggingface/hub/models--docling-project--*`, the tokenizer
+`models--Qwen--Qwen3-Embedding-0.6B`). `--dry-run --uninstall` lists every path
+the uninstall would delete, with its size, and changes nothing:
+
+```bash
+./install.sh --uninstall --purge --dry-run
+```
+
 ## Full Disk Access
 
 Folders under `~/Documents`, `~/Desktop`, `~/Downloads` and iCloud Drive are
@@ -241,6 +259,14 @@ Installed under `~/Library/Application Support/haiku.rag/`:
 | `service/service.log` | The service's log |
 | `raycast/` | The Raycast extension's working copy |
 | `source/` | This repository, when the installer ran on its own |
+
+Caches, deleted by `install.sh --uninstall --purge`:
+
+| Path | |
+|---|---|
+| `~/Library/Caches/haiku.rag/uv/` | uv's package cache for the Python environments and the menu |
+| `~/Library/Caches/haiku.rag/huggingface/`, `~/Library/Caches/haiku.rag/docling/` | Models the service downloads: docling's layout and table models, the chunking tokenizer |
+| `~/Library/Application Support/com.raycast.macos/extensions/haiku-rag/` | The Raycast extension's page previews |
 
 ## Development
 

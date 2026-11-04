@@ -2,11 +2,13 @@
 # Build the launcher and render the service's files into OUT, installing nothing.
 #
 #   service/build.sh --out DIR --ingester PATH [--ane-server PATH] [--home DIR]
-#                    [--app-dir DIR] [--port N] [--label LABEL]
+#                    [--app-dir DIR] [--cache-dir DIR] [--port N] [--label LABEL]
 #                    [--embed-port N] [--embed-label LABEL] [--idle-exit SECONDS]
 #
 # The rendered files name their installed paths under APP_DIR (default
-# HOME/Library/Application Support/haiku.rag, HOME defaulting to $HOME). OUT
+# HOME/Library/Application Support/haiku.rag, HOME defaulting to $HOME). The
+# service downloads document-conversion models under CACHE_DIR (default
+# HOME/Library/Caches/haiku.rag), which the uninstaller's --purge deletes. OUT
 # receives:
 #
 #   bin/haiku-rag-service       the launcher, installed to APP_DIR/service/bin
@@ -28,6 +30,7 @@ ingester=
 ane_server=
 home=$HOME
 app=
+cache=
 port=8765
 label=com.haiku-rag.service
 embed_port=58741
@@ -41,6 +44,7 @@ while [ $# -gt 0 ]; do
         --ane-server) ane_server=$2; shift 2 ;;
         --home) home=$2; shift 2 ;;
         --app-dir) app=$2; shift 2 ;;
+        --cache-dir) cache=$2; shift 2 ;;
         --port) port=$2; shift 2 ;;
         --label) label=$2; shift 2 ;;
         --embed-port) embed_port=$2; shift 2 ;;
@@ -52,6 +56,7 @@ done
 [ -n "$out" ] || { echo "pass --out" >&2; exit 64; }
 [ -n "$ingester" ] || { echo "pass --ingester" >&2; exit 64; }
 [ -n "$app" ] || app="$home/Library/Application Support/haiku.rag"
+[ -n "$cache" ] || cache="$home/Library/Caches/haiku.rag"
 
 service="$app/service"
 mkdir -p "$out/bin"
@@ -68,6 +73,7 @@ render() {
         -e "s|@CONFIG@|$(escape "$app/haiku.rag.yaml")|g" \
         -e "s|@MODEL_DIR@|$(escape "$app/models/jina-nano-coreml")|g" \
         -e "s|@HOME@|$(escape "$home")|g" \
+        -e "s|@CACHE_DIR@|$(escape "$cache")|g" \
         -e "s|@PORT@|$port|g" \
         -e "s|@LABEL@|$(escape "$label")|g" \
         -e "s|@EMBED_PORT@|$embed_port|g" \

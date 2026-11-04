@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/tolgaerdonmez/haiku-rag-macos/main/install.sh | sh
 #   ./install.sh [--yes] [--dry-run] [component options]
-#   ./install.sh --uninstall [--yes] [--delete-index] [--keep-model]
+#   ./install.sh --uninstall [--yes] [--dry-run] [--delete-index] [--keep-model] [--purge]
 #
 # Components (recommended ones are preselected):
 #   --service / --no-service   background search service: launchd agent and launcher
@@ -20,9 +20,13 @@
 # Other:
 #   -y, --yes                  ask nothing: install the recommended set
 #   --dry-run                  check this Mac, show the menu (on a terminal, without
-#                              --yes) and print the plan; change nothing
+#                              --yes) and print the plan; change nothing. With
+#                              --uninstall, list every path it would delete, with sizes
 #   --uninstall                remove what this installer installs; the index is
 #                              kept unless --delete-index, indexed files are never touched
+#   --purge                    with --uninstall, also delete the caches: uv's packages and
+#                              docling's models in ~/Library/Caches/haiku.rag, and the
+#                              Raycast extension's page previews
 #
 # Run from a checkout it installs that checkout. Run on its own (piped to sh) it
 # clones this repository, or updates the clone, in HAIKU_RAG_MACOS_SOURCE (default
@@ -55,6 +59,14 @@ plist="$HOME/Library/LaunchAgents/$label.plist"
 embed_label=${HAIKU_RAG_EMBED_LABEL:-com.haiku-rag.ane-server}
 embed_plist="$HOME/Library/LaunchAgents/$embed_label.plist"
 raycast_ext="$HOME/.config/raycast/extensions/haiku-rag"
+# The Raycast extension's support directory: its rendered page previews.
+raycast_support="$HOME/Library/Application Support/com.raycast.macos/extensions/haiku-rag"
+# This install's own caches: uv's packages (here and in scripts/service.sh) and the
+# models the service downloads (service/com.haiku-rag.service.plist.in). The caches
+# in ~/.cache are shared with other tools, so --purge could not tell what is ours.
+cache="$HOME/Library/Caches/haiku.rag"
+UV_CACHE_DIR="$cache/uv"
+export UV_CACHE_DIR
 karabiner_json="$HOME/.config/karabiner/karabiner.json"
 karabiner_rule="Cmd+Shift+F opens haiku.rag Search Documents in Raycast"
 fda_pane="x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
@@ -73,6 +85,7 @@ dry_run=0
 uninstall=0
 delete_index=0
 keep_model=0
+purge=0
 want_service=
 want_model=
 want_raycast=
@@ -99,6 +112,7 @@ parse_options() {
             --uninstall) uninstall=1 ;;
             --delete-index) delete_index=1 ;;
             --keep-model) keep_model=1 ;;
+            --purge) purge=1 ;;
             --service) want_service=1 ;;
             --no-service) want_service=0 ;;
             --model) want_model=1 ;;
@@ -244,7 +258,11 @@ app_installed() {
 }
 
 human_kb() {
-    awk -v kb="$1" 'BEGIN { if (kb >= 1048576) printf "%.1f GB", kb / 1048576; else printf "%d MB", kb / 1024 }'
+    awk -v kb="$1" 'BEGIN {
+        if (kb >= 1048576) printf "%.1f GB", kb / 1048576
+        else if (kb >= 1024) printf "%d MB", kb / 1024
+        else printf "%d KB", kb
+    }'
 }
 
 has_raycast=0
@@ -830,17 +848,55 @@ print(f"  Karabiner: Cmd+Shift+F rule removed from {removed} profile(s)")
 EOF
 }
 
+# The paths uninstalling deletes, one per line, as the options stand.
+removal_paths() {
+    printf '%s\n' "$plist" "$embed_plist" "$env" "$app/service/haiku.rag" "$ane" "$launcher" \
+        "$app/service/bin/.launcher.c.sha256" "$app/service/bin/haiku-rag-serve" \
+        "$app/service/service.log" "$app/haiku.rag.yaml" "$app/haiku.rag.yaml.previous" \
+        "$raycast_ext" "$app/raycast"
+    [ "$keep_model" = 1 ] || printf '%s\n' "$model" "$model.previous" "$model.new"
+    if [ "$delete_index" = 1 ]; then
+        printf '%s\n' "$app/files.lancedb" "$app/ingester.db" "$app/ingester.db-shm" \
+            "$app/ingester.db-wal" "$app/folders.yaml" "$app/.folders.yaml.lock"
+    fi
+    case "$repo" in
+        "$app/source") printf '%s\n' "$app/source" ;;
+    esac
+    [ "$purge" = 0 ] || printf '%s\n' "$cache" "$raycast_support"
+}
+
+# size_kb PATH...: the disk the existing ones take, in KB.
+size_kb() {
+    total=0
+    for p in "$@"; do
+        [ -e "$p" ] || [ -L "$p" ] || continue
+        total=$((total + $(du -sk "$p" 2>/dev/null | awk '{ print $1 }')))
+    done
+    printf '%s' "$total"
+}
+
+dry_run_uninstall() {
+    heading "Dry run: nothing changed. Uninstalling would delete:"
+    removal_paths | while IFS= read -r p; do
+        [ -e "$p" ] || [ -L "$p" ] || continue
+        note "$(human_kb "$(size_kb "$p")")	$p"
+    done
+    if hotkey_installed; then note "and remove the Cmd+Shift+F rule from $karabiner_json"; fi
+}
+
 uninstall() {
     heading "Uninstall"
     note "Removes the agents, launcher, Python environments, embedding server, configuration,"
     note "Raycast extension, Cmd+Shift+F rule$( [ "$keep_model" = 1 ] || printf ', model') and the fetched sources in $app."
+    [ "$purge" = 0 ] || note "With --purge also the caches in $cache and the Raycast page previews."
     note "Indexed folders and their files are never touched."
     if [ "$interactive" = 1 ]; then
         ask "Uninstall?" y || exit 0
         [ "$delete_index" = 1 ] || ! ask "Also delete the index, the queue and the folder list?" n || delete_index=1
         [ "$keep_model" = 1 ] || ask "Also delete the embedding model ($(human_kb $size_model))?" y || keep_model=1
+        [ "$purge" = 1 ] || ! ask "Also delete the caches: downloaded packages and document models, Raycast page previews ($(human_kb "$(size_kb "$cache" "$raycast_support")"))?" n || purge=1
     fi
-    [ "$dry_run" = 0 ] || { note "Dry run: nothing changed"; return 0; }
+    [ "$dry_run" = 0 ] || { dry_run_uninstall; return 0; }
 
     remove_hotkey
     if [ -f "$plist" ] || [ -d "$env" ] || [ -f "$embed_plist" ] || [ -d "$ane" ]; then
@@ -871,6 +927,10 @@ uninstall() {
         "$app/source") rm -rf "$app/source" ;;
     esac
     rmdir "$app" 2>/dev/null || true
+    if [ "$purge" = 1 ]; then
+        rm -rf "$cache" "$raycast_support"
+        note "Caches deleted: $cache and the Raycast page previews"
+    fi
     note "Remove haiku-rag-service from System Settings > Privacy & Security > Full Disk Access."
 }
 
