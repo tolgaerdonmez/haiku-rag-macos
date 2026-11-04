@@ -1,0 +1,6 @@
+#!/bin/sh
+# What the launcher runs for the search service agent: haiku-rag-macos reader,
+# serving the socket launchd holds (HAIKU_RAG_LISTEN_FD passes through). It
+# reads files only to place a hit's line, which the launcher's Full Disk
+# Access allows, and starts the ingester agent when it starts.
+exec '@BIN@/haiku-rag-macos' --config '@CONFIG@' reader --ingester-label '@INGESTER_LABEL@'

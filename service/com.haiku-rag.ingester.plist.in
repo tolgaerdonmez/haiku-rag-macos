@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>@INGESTER_LABEL@</string>
+
+    <!-- haiku-ingester serve, from haiku.rag, under haiku-rag-macos, which
+         stops it once idle. The launcher holds the Full Disk Access grant. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>@LAUNCHER@</string>
+        <string>@INGESTER@</string>
+    </array>
+
+    <!-- Started at login, every hour, when the folder fragments change, and
+         by the search service when it starts: each time it indexes what
+         changed, then exits once idle. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>WatchPaths</key>
+    <array>
+        <string>@FRAGMENTS@</string>
+    </array>
+    <!-- An idle exit is successful and waits for the next start. Any other
+         exit restarts it: a stalled conversion makes haiku-ingester exit, and
+         only that document is lost. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <!-- Longer than ingester.workers.shutdown_grace_s (60 s): the launcher
+         waits for the ingester, which releases its jobs before it exits. -->
+    <key>ExitTimeOut</key>
+    <integer>90</integer>
+
+    <!-- Background would hold the whole process tree to the efficiency
+         cores; Nice 10 and low-priority I/O keep Standard light. -->
+    <key>ProcessType</key>
+    <string>Standard</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>LowPriorityBackgroundIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>@HOME@</string>
+        <key>HAIKU_RAG_CONFIG_PATH</key>
+        <string>@CONFIG@</string>
+        <!-- Docling's layout and table models and the chunking tokenizer
+             download into a cache of this install's own, not the shared
+             ~/.cache/huggingface, so uninstalling with purge removes them. -->
+        <key>HF_HOME</key>
+        <string>@CACHE_DIR@/huggingface</string>
+        <key>DOCLING_CACHE_DIR</key>
+        <string>@CACHE_DIR@/docling</string>
+        <key>LOGFIRE_IGNORE_NO_CONFIG</key>
+        <string>1</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>@STATE_DIR@</string>
+    <key>StandardOutPath</key>
+    <string>@STATE_DIR@/ingester.log</string>
+    <key>StandardErrorPath</key>
+    <string>@STATE_DIR@/ingester.log</string>
+</dict>
+</plist>

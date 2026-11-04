@@ -5,15 +5,18 @@
     <key>Label</key>
     <string>@LABEL@</string>
 
-    <!-- The launcher holds the Full Disk Access grant and runs the service. -->
+    <!-- The search service (haiku-rag-macos reader): searches, folders and
+         status for Raycast. The launcher holds the Full Disk Access grant. -->
     <key>ProgramArguments</key>
     <array>
         <string>@LAUNCHER@</string>
-        <string>@SERVE@</string>
+        <string>@READER@</string>
     </array>
 
     <!-- launchd listens on the port and starts the service on the first
-         connection; the launcher hands the socket on. -->
+         connection; the launcher hands the socket on. Idle, the service
+         exits; the next connection starts it again. Neither RunAtLoad nor
+         KeepAlive: it runs only while it is asked. -->
     <key>Sockets</key>
     <dict>
         <key>Listeners</key>
@@ -28,33 +31,11 @@
             <string>stream</string>
         </dict>
     </dict>
-
-    <!-- At login, to index what changed while it was not running. -->
-    <key>RunAtLoad</key>
-    <true/>
-    <!-- Restarted after a crash; an idle exit waits for the next request. -->
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
-    <key>ThrottleInterval</key>
-    <integer>30</integer>
-    <!-- Longer than ingester.workers.shutdown_grace_s (60 s): the launcher
-         waits for the service, which releases its jobs before it exits. -->
     <key>ExitTimeOut</key>
-    <integer>90</integer>
+    <integer>20</integer>
 
-    <!-- Background holds the whole process tree to the efficiency cores;
-         Nice 10, low-priority I/O and the throttle keep Standard light. -->
     <key>ProcessType</key>
     <string>Standard</string>
-    <key>LowPriorityIO</key>
-    <true/>
-    <key>LowPriorityBackgroundIO</key>
-    <true/>
-    <key>Nice</key>
-    <integer>10</integer>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -64,19 +45,16 @@
         <string>@HOME@</string>
         <key>HAIKU_RAG_CONFIG_PATH</key>
         <string>@CONFIG@</string>
-        <!-- Docling's layout and table models and the chunking tokenizer
-             download into a cache of this install's own, not the shared
-             ~/.cache/huggingface, so uninstalling with purge removes them. -->
         <key>HF_HOME</key>
         <string>@CACHE_DIR@/huggingface</string>
-        <key>DOCLING_CACHE_DIR</key>
-        <string>@CACHE_DIR@/docling</string>
+        <key>LOGFIRE_IGNORE_NO_CONFIG</key>
+        <string>1</string>
     </dict>
     <key>WorkingDirectory</key>
     <string>@STATE_DIR@</string>
     <key>StandardOutPath</key>
-    <string>@STATE_DIR@/service.log</string>
+    <string>@STATE_DIR@/reader.log</string>
     <key>StandardErrorPath</key>
-    <string>@STATE_DIR@/service.log</string>
+    <string>@STATE_DIR@/reader.log</string>
 </dict>
 </plist>

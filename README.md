@@ -4,10 +4,14 @@ macOS setup for [haiku.rag](https://github.com/ggozad/haiku.rag): search your ow
 files by meaning from Raycast, served by a background service on this Mac, with
 the embeddings computed on the Apple Neural Engine.
 
-- **The search service**: `haiku-ingester serve` from haiku.rag as a per-user
-  launchd agent. It watches the folders you register, converts and indexes what
-  changes, and answers searches on `127.0.0.1:8765`. It starts on demand, runs at
-  low priority and exits when idle.
+- **The indexer**: `haiku-ingester serve` from
+  [haiku.rag](https://pypi.org/project/haiku.rag/) (0.107.0, from PyPI) as a
+  per-user launchd agent. It watches the folders you register, converts and
+  indexes what changes, runs at low priority and exits when idle.
+- **The search service** (`desktop/`): `haiku-rag-macos reader`, a small server
+  on `127.0.0.1:8765` that reads the index through haiku.rag's client and
+  answers searches, manages the folders and reports the indexer's status. It
+  starts on demand and exits when idle.
 - **The Neural Engine embedding server** (`ane-server/`): an OpenAI-compatible
   `/v1/embeddings` endpoint on `127.0.0.1:58741` running
   jina-embeddings-v5-omni-nano as a Core ML model on the Neural Engine. haiku.rag
@@ -43,7 +47,7 @@ changing anything.
 
 | Component | | Preselected |
 |---|---|---|
-| `service` | The search service: launchd agent, its launcher and haiku.rag's Python environment (about 1.9 GB) | yes |
+| `service` | The indexer and the search service: their launchd agents, the launcher and the Python environment with haiku.rag (about 1.9 GB) | yes |
 | `model` | The embedding model from Hugging Face (about 850 MB installed, 420 MB download, each file checked against its SHA-256) and the Neural Engine server that runs it, with its own launchd agent | yes |
 | `raycast` | The Raycast extension. Needs Node.js | when Raycast is installed |
 | `hotkey` | Cmd+Shift+F opens Search Documents, as a Karabiner-Elements rule. Other apps lose Cmd+Shift+F | no; offered when Karabiner is installed |
@@ -81,7 +85,7 @@ or with `HAIKU_RAG_TUI=0`, a numbered menu asks instead.
 ~/Library/Application\ Support/haiku.rag/source/install.sh --uninstall
 ```
 
-(or `./install.sh --uninstall` from a checkout) removes both agents, the launcher,
+(or `./install.sh --uninstall` from a checkout) removes the agents, the launcher,
 the Python environments, the embedding server, the configuration, the Raycast
 extension, the Cmd+Shift+F rule, the model and the fetched sources. It asks before
 deleting the index, the queue and the folder list, and keeps them by default
@@ -111,10 +115,12 @@ the uninstall would delete, with its size, and changes nothing:
 
 Folders under `~/Documents`, `~/Desktop`, `~/Downloads` and iCloud Drive are
 private: a process launchd starts cannot read them until the program responsible
-for it has Full Disk Access. That program is the service's launcher,
+for it has Full Disk Access. That program is the launcher,
 `~/Library/Application Support/haiku.rag/service/bin/haiku-rag-service`, a small
-C program (`service/launcher.c`) that launchd runs and that runs the service as
-its child. The service and its conversion processes inherit its access.
+C program (`service/launcher.c`) that launchd runs for both agents and that
+runs the indexer, or the search service, as its child. They inherit its access:
+the indexer reads the folders, the search service reads a text file to find a
+hit's line.
 
 1. Open **System Settings > Privacy & Security > Full Disk Access**.
 2. Click **+**, press **Cmd+Shift+G**, paste the launcher's path, press Return and
@@ -127,38 +133,58 @@ given, so it survives upgrades of haiku.rag, Python and the configuration. The
 installer replaces the launcher only when `launcher.c` changes; then the switch
 has to be turned off and on again, and the installer says so. Without the grant,
 a folder under a private location fails discovery: its sweep logs
-`Operation not permitted`, and Manage Indexed Folders shows it with no documents.
+`Operation not permitted` in `service/ingester.log`, and Manage Indexed Folders
+shows it with no documents.
 The embedding server reads only the model and needs no grant.
 
 ## How it runs
 
 ```text
-Raycast ──► 127.0.0.1:8765  search service (haiku-ingester serve)
-                 │  launchd: com.haiku-rag.service, launcher with Full Disk Access
+Raycast ──► 127.0.0.1:8765  search service (haiku-rag-macos reader)
+                 │  launchd: com.haiku-rag.service, on demand
+                 │  reads the index; asks the indexer for status and failures
+                 ▼
+            127.0.0.1:8766  indexer (haiku-ingester serve, haiku.rag)
+                 │  launchd: com.haiku-rag.ingester, writes the index
                  ▼
             127.0.0.1:58741 Neural Engine embedding server (OpenAI API)
                     launchd: com.haiku-rag.ane-server
 ```
 
-- **On demand.** launchd listens on both ports and starts each process on its
-  first connection. The search service also starts once at login (`RunAtLoad`)
-  to index what changed while it was stopped, and exits after
-  `ingester.service.idle_exit_s` (30 minutes) with no request and nothing to
-  ingest. The embedding server exits after `HAIKU_RAG_EMBED_IDLE_EXIT` seconds
-  without a request (300), releasing the model; the next embedding starts it
-  again in about a second.
-- **Lightly.** The service runs at `Nice 10` with low-priority I/O. Conversion runs
-  at most `processing.supervisor.workers` processes at once, each exiting after a
-  minute idle, and the throttle pauses conversions on battery, under load and in
-  low memory. After indexing it compacts the index back to its live size.
-- **Crashes** restart the service (`KeepAlive` on an unsuccessful exit), at most
-  every 30 s.
+Both service agents run through the launcher, which holds the Full Disk Access
+grant.
+
+- **The indexer writes, the search service reads.** haiku-ingester is the one
+  writer of the index. The search service opens it read-only through
+  haiku.rag's client, and gets the queue's state and the failed documents from
+  haiku-ingester's own API (`/stats`, `/sources`, `/dlq`).
+- **On demand.** launchd listens on 8765 and 58741 and starts the search
+  service and the embedding server on their first connection; they exit after
+  15 and 5 idle minutes (`HAIKU_RAG_EMBED_IDLE_EXIT`, 300 s). The indexer starts
+  at login, every hour, when the folder list changes, and whenever the search
+  service starts, indexes what changed, and exits once it has been idle for 10
+  minutes and its maintenance pass has run (`haiku-rag-macos ingester
+  --idle-exit`).
+- **Lightly.** The indexer runs at `Nice 10` with low-priority I/O and 4
+  conversion workers. haiku.rag's maintenance (`ingester.maintenance`) vacuums
+  the index and builds its vector index two quiet minutes after the last
+  write.
+- **Stalls and crashes.** A conversion that runs past
+  `processing.conversion_timeout` (300 s) fails its document, and haiku-ingester
+  exits; launchd restarts it (`KeepAlive` on an unsuccessful exit, at most every
+  30 s), so only that document is lost. Large PDFs convert 20 pages at a time
+  (`processing.split_pages`).
 
 The configuration (`service/haiku.rag.yaml.in`, installed as
-`~/Library/Application Support/haiku.rag/haiku.rag.yaml`) is sized for a first
-full index: 8 conversion processes with Apple Vision OCR (RapidOCR for the
-retry), 1024-token chunks. Lower `processing.supervisor.workers` and
-`ingester.workers.worker_count` for a lighter steady state.
+`~/Library/Application Support/haiku.rag/haiku.rag.yaml`) uses Apple Vision OCR
+and 1024-token chunks, and keeps PDF attachments out (haiku.rag#829). The
+folders live in `databases.d/`, one file per database (haiku.rag's
+`databases_include`), which `scripts/service.sh folders`, Manage Indexed Folders
+and the search service's `/folders` edit; haiku-ingester reloads it. A folder
+removed with its documents is listed in `databases.d/.retired.yaml`, and the
+`macos-folders` haiku.rag hook (`desktop/haiku_rag_macos/hook.py`) deletes its
+documents inside haiku-ingester when it restarts the database. The search
+service's HTTP contract is [docs/search-api.md](docs/search-api.md).
 
 ## The embedding server
 
@@ -183,19 +209,22 @@ The model expects the prefixes `Query: ` and `Document: `; haiku.rag adds them
 
 ## haiku.rag's version
 
-The service runs haiku.rag from
-[tolgaerdonmez/haiku.rag](https://github.com/tolgaerdonmez/haiku.rag), a fork
-that is upstream main plus three pull requests open there (fixes, supervised
-conversion and the local search service), until those are released upstream.
-`scripts/service.sh` pins it to one commit, `haiku_rag_commit`, fetches that commit
-and builds the environment with the `uv.lock` it holds, so every install gets the
-same packages. `HAIKU_RAG_COMMIT` (a full commit id) and `HAIKU_RAG_REPO` install
-another commit or repository.
+haiku.rag comes from PyPI, unmodified: the service uses only its public API
+(the client, the CLI, haiku-ingester and its HTTP API, configuration fragments
+and hooks). `desktop/pyproject.toml` pins `haiku.rag-slim[docling,ingester]`
+and constrains every other package to the versions in haiku.rag's own
+`uv.lock` at that release, so the service runs the package set haiku.rag was
+tested with; `desktop/uv.lock` holds the result. Two additions: `onnxruntime`,
+without which RapidOCR falls back to torch (haiku.rag#828), and `ocrmac` for
+Apple Vision OCR.
 
-Once [ggozad/haiku.rag](https://github.com/ggozad/haiku.rag) releases them,
-switch to the release: `HAIKU_RAG_RELEASE=0.107.0 scripts/service.sh install`
-installs `haiku.rag[ingester]==0.107.0` from PyPI instead (setting
-`haiku_rag_release` in the script makes it the default).
+To move to another release, with haiku.rag's `uv.lock` at its tag:
+
+```bash
+scripts/pin-haiku-rag.py 0.108.0 path/to/haiku.rag/uv.lock
+(cd desktop && uv lock)
+scripts/service.sh install
+```
 
 ## Managing it: `scripts/service.sh`
 
@@ -204,29 +233,42 @@ service from a checkout:
 
 | Command | |
 |---|---|
-| `install` | Fetch haiku.rag, build its environment, install the service's files and agent, the Raycast extension and the Karabiner rule. `--no-raycast`, `--no-karabiner`, `--folders-seed FILE` |
+| `install` | Build the Python environment from `desktop/uv.lock`, install the launcher, configuration and both agents, the Raycast extension and the Karabiner rule. `--no-raycast`, `--no-karabiner` |
 | `embedder` | Install the embedding server and its agent; `--model-from DIR` installs that model first |
-| `status` | Both agents' state and the service's `/status` |
-| `restart` | Restart the service (and stop a running embedding server) |
-| `pause`, `resume` | Unload the service's agent until the next login, load it again |
-| `logs`, `logs embedder` | Follow the service's or the embedding server's log |
-| `cli ARGUMENT...` | `haiku-rag` with the service's configuration, e.g. `cli rebuild --rechunk` (pause first) |
+| `status` | The indexer's state, the search service's `/status`, the embedding server's state |
+| `restart` | Restart the indexer, stop the search service until its next request (and stop a running embedding server) |
+| `pause`, `resume` | Unload the indexer's and the search service's agents until the next login, load them again |
+| `logs`, `logs reader`, `logs embedder` | Follow the indexer's, the search service's or the embedding server's log |
+| `folders list`, `folders add DIR`, `folders update ID`, `folders remove ID` | The indexed folders (`haiku-rag-macos folders`: `--include`, `--exclude`, `--id`, `--keep-documents`) |
+| `cli ARGUMENT...` | `haiku-rag` with the service's configuration, e.g. `cli info` |
 | `raycast`, `karabiner` | One install step |
 | `uninstall` | Remove the agents, the embedding server and the environment; data, model, launcher and Raycast extension stay |
 
-`HAIKU_RAG_SERVICE_LABEL`, `HAIKU_RAG_SERVICE_PORT`, `HAIKU_RAG_EMBED_LABEL` and
-`HAIKU_RAG_EMBED_PORT` change the agents' labels and ports, so a test install under
-another `HOME` runs beside the real one.
+`HAIKU_RAG_SERVICE_LABEL`, `HAIKU_RAG_SERVICE_PORT` (the search service),
+`HAIKU_RAG_INGESTER_LABEL`, `HAIKU_RAG_INGESTER_PORT` (the indexer's API),
+`HAIKU_RAG_EMBED_LABEL` and `HAIKU_RAG_EMBED_PORT` change the agents' labels and
+ports, so a test install under another `HOME` runs beside the real one.
 
-### Coming from the installer in haiku.rag
+### Coming from an earlier install
 
-An earlier version of this setup lived in the haiku.rag fork and embedded
-in-process with a `coreml` provider. Running this installer over it keeps the
-index, the folder list, the model and the launcher (and so its Full Disk Access
-grant). The index records the embedder that wrote it; since the embedding server
-runs the same model the same way and returns the same vectors, the installer
-records the server as that embedder (`haiku-rag rebuild --set-embedder`) and
-re-embeds nothing.
+An earlier version of this setup ran a haiku.rag fork whose `haiku-ingester
+serve` also searched, kept a `folders.yaml` register and supervised its
+conversions in processes of their own. Running this installer over it keeps the
+index, the queue, the model and the launcher (and so its Full Disk Access
+grant): haiku.rag 0.107.0 opens that index as it is, re-indexing nothing. It
+moves the folders of `folders.yaml` into `databases.d/files.yaml` with the same
+ids, so every document keeps its folder, and keeps the old file as
+`folders.yaml.previous`. The configuration is replaced (the old one kept as
+`haiku.rag.yaml.previous`), and the agent `com.haiku-rag.service` becomes the
+search service beside the new `com.haiku-rag.ingester`. Chunks the fork indexed
+carry their page boxes in their metadata; the search service reads them, and
+resolves the boxes of newer chunks from the stored document.
+
+An install older still embedded in-process with a `coreml` provider. The index
+records the embedder that wrote it; since the embedding server runs the same
+model the same way and returns the same vectors, the installer records the
+server as that embedder (`haiku-rag rebuild --set-embedder`) and re-embeds
+nothing.
 
 ## Files
 
@@ -236,11 +278,14 @@ In this repository:
 |---|---|
 | `install.sh` | The installer |
 | `scripts/install-tui.py` | Its menu |
-| `scripts/service.sh` | Install and manage the service and the embedding server |
-| `service/launcher.c` | The launcher: holds the Full Disk Access grant, hands launchd's socket to the service, runs it as its child |
-| `service/haiku-rag-serve.in` | What the launcher runs: `haiku-ingester serve`, or a successful exit while the model is missing |
-| `service/com.haiku-rag.service.plist.in`, `service/com.haiku-rag.ane-server.plist.in` | The launchd agents |
-| `service/haiku.rag.yaml.in`, `service/folders.yaml` | The configuration and the empty folder register |
+| `scripts/service.sh` | Install and manage the services and the embedding server |
+| `scripts/pin-haiku-rag.py` | Pins `desktop/` to a haiku.rag release's tested package set |
+| `desktop/` | `haiku-rag-macos`: the search service, the folder register, the `macos-folders` hook and the indexer's idle exit, with its `uv.lock` |
+| `docs/search-api.md` | The search service's HTTP contract |
+| `service/launcher.c` | The launcher: holds the Full Disk Access grant, hands launchd's socket to the search service, runs either service as its child |
+| `service/haiku-rag-reader.in`, `service/haiku-rag-ingester.in` | What the launcher runs; the indexer exits successfully while the model is missing |
+| `service/com.haiku-rag.service.plist.in`, `service/com.haiku-rag.ingester.plist.in`, `service/com.haiku-rag.ane-server.plist.in` | The launchd agents |
+| `service/haiku.rag.yaml.in` | The configuration |
 | `service/build.sh` | Compiles the launcher and renders all of the above for an install directory, installing nothing (for other installers, such as a Nix module) |
 | `ane-server/` | The embedding server, with its `uv.lock` |
 | `raycast/` | The Raycast extension ([README](raycast/README.md)) |
@@ -250,13 +295,14 @@ Installed under `~/Library/Application Support/haiku.rag/`:
 
 | Path | |
 |---|---|
-| `haiku.rag.yaml`, `folders.yaml` | Configuration and folder register |
+| `haiku.rag.yaml` | Configuration |
+| `databases.d/` | The indexed folders, one file per database, and `.retired.yaml` |
 | `files.lancedb/`, `ingester.db` | The index and the queue |
 | `models/jina-nano-coreml/` | The embedding model |
 | `service/bin/haiku-rag-service` | The launcher, the program granted Full Disk Access |
-| `service/env/`, `service/haiku.rag/` | haiku.rag's Python environment and the source it was built from |
+| `service/env/` | The Python environment: haiku.rag and haiku-rag-macos |
+| `service/ingester.log`, `service/reader.log` | The indexer's and the search service's logs |
 | `ane-server/env/`, `ane-server/ane-server.log` | The embedding server's environment and log |
-| `service/service.log` | The service's log |
 | `raycast/` | The Raycast extension's working copy |
 | `source/` | This repository, when the installer ran on its own |
 
@@ -265,7 +311,7 @@ Caches, deleted by `install.sh --uninstall --purge`:
 | Path | |
 |---|---|
 | `~/Library/Caches/haiku.rag/uv/` | uv's package cache for the Python environments and the menu |
-| `~/Library/Caches/haiku.rag/huggingface/`, `~/Library/Caches/haiku.rag/docling/` | Models the service downloads: docling's layout and table models, the chunking tokenizer |
+| `~/Library/Caches/haiku.rag/huggingface/`, `~/Library/Caches/haiku.rag/docling/` | Models the indexer downloads: docling's layout and table models, the chunking tokenizer |
 | `~/Library/Application Support/com.raycast.macos/extensions/haiku-rag/` | The Raycast extension's page previews |
 
 ## Development
@@ -273,6 +319,7 @@ Caches, deleted by `install.sh --uninstall --purge`:
 ```bash
 uv run --project ane-server pytest            # installer, menu and embedding server
 uv run --project ane-server pytest -m integration   # also on a terminal and with test agents
+uv run --project desktop pytest desktop/tests       # search service, folders, hook, idle exit
 (cd raycast && npm install && npm test)
 ```
 

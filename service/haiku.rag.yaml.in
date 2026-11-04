@@ -1,15 +1,27 @@
-# The local search service's configuration, rendered by service/build.sh to
+# The search service's haiku.rag configuration, rendered by service/build.sh to
 # ~/Library/Application Support/haiku.rag/haiku.rag.yaml. Paths use ${HOME} and
-# are absolute, so the file also works as a symlink. Embeddings come from the
-# Neural Engine embedding server (ane-server/, its own launchd agent), which
-# serves the Core ML model in models/jina-nano-coreml on an OpenAI-compatible API.
+# are absolute, so the file also works as a symlink. haiku-ingester writes the
+# index; the search service reads it. Embeddings come from the Neural Engine
+# embedding server (ane-server/, its own launchd agent), which serves the Core
+# ML model in models/jina-nano-coreml on an OpenAI-compatible API.
 environment: production
+# The indexed folders: one fragment per database in databases.d, written by
+# `haiku-rag-macos folders` and the search service. haiku-ingester reloads them.
+databases_include: ${HOME}/Library/Application Support/haiku.rag/databases.d
+hooks:
+  # Deletes a removed folder's documents inside haiku-ingester (haiku-rag-macos).
+  - name: macos-folders
+    options:
+      directory: ${HOME}/Library/Application Support/haiku.rag/databases.d
 storage:
   data_dir: ${HOME}/Library/Application Support/haiku.rag
+  # Old versions the maintenance vacuum keeps: the search service, a separate
+  # process, may still read one for a moment.
+  vacuum_retention_seconds: 600
 lancedb:
   databases:
     files: ${HOME}/Library/Application Support/haiku.rag/files.lancedb
-  read_consistency_interval_seconds: 2
+  read_consistency_interval_seconds: 2   # searches see new documents quickly
 embeddings:
   model:
     provider: openai              # the Neural Engine embedding server
@@ -21,36 +33,23 @@ embeddings:
 processing:
   chunk_size: 1024                # the model's longest function is 2048 tokens
   pictures: none
+  conversion_timeout: 300         # a stalled conversion fails; the ingester exits and launchd restarts it
+  split_pages: 20                 # large PDFs convert 20 pages at a time
+  # An attachment the converter cannot parse fails its PDF (ggozad/haiku.rag#829).
+  extract_pdf_attachments: false
   conversion_options:
-    ocr_engine: ocrmac            # Apple Vision; RapidOCR is the retry
+    ocr_engine: ocrmac            # Apple Vision
     table_mode: fast
     generate_page_images: false
-  supervisor:
-    enabled: true
-    workers: 8                    # sized for the first full index; ~2-3 GB each
-    threads_per_worker: 2
-    background: false             # performance cores; Nice 10 and the throttle spare the machine
-    unit_timeout: 300
-    page_batch: 20
-    retry_ocr_engine: rapidocr
 ingester:
-  folders_register: ${HOME}/Library/Application Support/haiku.rag/folders.yaml
   queue:
     path: ${HOME}/Library/Application Support/haiku.rag/ingester.db
   workers:
-    worker_count: 8               # one per conversion process
+    worker_count: 4
     poll_idle_interval_s: 5
   api:
     host: 127.0.0.1
-    port: @PORT@                  # the agent's socket in com.haiku-rag.service.plist.in
-  service:
-    search_idle_s: 300            # unload the search client after 5 idle minutes
-    idle_exit_s: 1800             # exit after 30 idle minutes; launchd restarts on demand
-    throttle:
-      on_battery: pause
-      max_load: 1.2               # per core, sized for 8 conversion processes of 2 threads
-      min_free_memory_percent: 10
-    vacuum_after_indexing:
-      min_documents: 50           # once the queue drains after this many documents; haiku.rag leaves it off (null)
-      quiet_s: 60
-      retention_seconds: 0        # drop every old version, so the index shrinks to its live size
+    port: @INGESTER_PORT@         # haiku-ingester's own API; the search service talks to it
+  maintenance:
+    enabled: true                 # vacuum and the vector index once writes go quiet
+    quiet_s: 120

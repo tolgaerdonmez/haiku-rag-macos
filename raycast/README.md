@@ -1,8 +1,8 @@
 # haiku.rag for Raycast
 
 Search the files haiku.rag indexes and land on the exact page and passage.
-It talks to the local search service (`haiku-ingester serve`, contract in
-haiku.rag's [`docs/local-search-api.md`](https://github.com/tolgaerdonmez/haiku.rag/blob/main/docs/local-search-api.md)).
+It talks to the local search service (`haiku-rag-macos reader`, contract in
+[`docs/search-api.md`](../docs/search-api.md)).
 The [installer](../README.md) builds, registers and updates it.
 
 ## Commands

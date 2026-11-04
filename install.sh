@@ -33,8 +33,8 @@
 # ~/Library/Application Support/haiku.rag/source) and runs the installer found
 # there. HAIKU_RAG_MACOS_REPO and HAIKU_RAG_MACOS_REF pick another repository or
 # branch, HAIKU_RAG_MODEL_REPO another model repository and HF_ENDPOINT another
-# Hugging Face host. haiku.rag itself is fetched at the commit scripts/service.sh
-# pins. Prompts read the terminal, so they work when the script itself arrives on
+# Hugging Face host. haiku.rag itself comes from PyPI at the version
+# desktop/uv.lock pins. Prompts read the terminal, so they work when the script itself arrives on
 # stdin. The menu is scripts/install-tui.py, run with uv; without uv, without a
 # terminal it can draw on, or with HAIKU_RAG_TUI=0, a numbered menu asks instead.
 set -eu
@@ -56,6 +56,8 @@ ane="$app/ane-server"
 label=${HAIKU_RAG_SERVICE_LABEL:-com.haiku-rag.service}
 port=${HAIKU_RAG_SERVICE_PORT:-8765}
 plist="$HOME/Library/LaunchAgents/$label.plist"
+ingester_label=${HAIKU_RAG_INGESTER_LABEL:-com.haiku-rag.ingester}
+ingester_plist="$HOME/Library/LaunchAgents/$ingester_label.plist"
 embed_label=${HAIKU_RAG_EMBED_LABEL:-com.haiku-rag.ane-server}
 embed_plist="$HOME/Library/LaunchAgents/$embed_label.plist"
 raycast_ext="$HOME/.config/raycast/extensions/haiku-rag"
@@ -283,7 +285,7 @@ detect() {
     free_kb=${free_kb:-0}
 }
 
-service_installed() { [ -f "$plist" ] && [ -x "$env/bin/haiku-ingester" ]; }
+service_installed() { [ -f "$plist" ] && [ -x "$env/bin/haiku-rag-macos" ]; }
 model_installed() { [ -e "$model/model.mlpackage" ] && [ -e "$model/tokenizer.json" ]; }
 embedder_installed() { model_installed && [ -f "$embed_plist" ] && [ -x "$ane/env/bin/haiku-rag-ane-server" ]; }
 raycast_installed() { [ -f "$raycast_ext/package.json" ]; }
@@ -614,8 +616,8 @@ fetch_model() {
 run_service() { "$service_sh" "$@"; }
 
 registered_folders() {
-    [ -x "$env/bin/haiku-rag" ] || return 0
-    run_service cli folders list 2>/dev/null | awk -F '\t' 'NF >= 3 { print $3 }'
+    [ -x "$env/bin/haiku-rag-macos" ] || return 0
+    run_service folders list 2>/dev/null | awk -F '\t' 'NF >= 3 { print $3 }'
 }
 
 expand_path() {
@@ -645,23 +647,20 @@ ask_folders() {
 
 register_folders() {
     [ -n "$folders" ] || return 0
-    [ -x "$env/bin/haiku-rag" ] || { warn "folders need the service; skipped"; return 0; }
+    [ -x "$env/bin/haiku-rag-macos" ] || { warn "folders need the service; skipped"; return 0; }
     printf '%s' "$folders" | while IFS= read -r folder; do
         [ -n "$folder" ] || continue
         set --
         set -f
         for pattern in $excludes; do set -- "$@" --exclude "$pattern"; done
         set +f
-        if out=$(run_service cli folders add "$folder" "$@" 2>&1); then
+        workdir
+        if out=$(run_service folders add "$folder" "$@" 2>"$work/folder.err"); then
             note "Folder: $(printf '%s' "$out" | head -n 1 | awk -F '\t' '{ print $3 " (" $1 ")" }')"
         else
-            warn "Folder $folder: $(printf '%s' "$out" | sed 's/^Error: //' | head -n 1)"
+            warn "Folder $folder: $(sed 's/^haiku-rag-macos: //' "$work/folder.err" | tail -n 1)"
         fi
     done
-    # A service still starting may not watch the register yet: have it read it again.
-    if [ -f "$plist" ]; then
-        api 60 /reload -X POST >/dev/null 2>&1 || warn "the service did not reload; run: $service_sh restart"
-    fi
 }
 
 # Raycast registers a local extension only while it runs.
@@ -700,7 +699,7 @@ install_steps() {
         if [ "$want_hotkey" = 1 ]; then heading "Hotkey"; run_service karabiner; fi
     fi
     if [ "$want_folders" = 1 ]; then
-        if [ -x "$env/bin/haiku-rag" ]; then
+        if [ -x "$env/bin/haiku-rag-macos" ]; then
             ask_folders
             if [ -n "$folders" ]; then heading "Folders"; register_folders; fi
         else
@@ -757,7 +756,7 @@ full_disk_access() {
 verify() {
     heading "Check"
     if ! n=$(documents); then
-        warn "the service does not answer on 127.0.0.1:$port; see $app/service/service.log"
+        warn "the service does not answer on 127.0.0.1:$port; see $app/service/reader.log"
         return 0
     fi
     note "ok  the service answers on 127.0.0.1:$port, $n documents indexed"
@@ -775,7 +774,7 @@ summary() {
     heading "Done"
     if service_installed; then
         note "Search:     Raycast > Search Documents, or curl 'http://127.0.0.1:$port/search?q=...'"
-        note "Folders:    Raycast > Manage Indexed Folders, or $service_sh cli folders add DIR"
+        note "Folders:    Raycast > Manage Indexed Folders, or $service_sh folders add DIR"
         note "Pause:      $service_sh pause    (resume: $service_sh resume)"
         note "Status:     $service_sh status    (log: $service_sh logs)"
     fi
@@ -850,14 +849,17 @@ EOF
 
 # The paths uninstalling deletes, one per line, as the options stand.
 removal_paths() {
-    printf '%s\n' "$plist" "$embed_plist" "$env" "$app/service/haiku.rag" "$ane" "$launcher" \
-        "$app/service/bin/.launcher.c.sha256" "$app/service/bin/haiku-rag-serve" \
-        "$app/service/service.log" "$app/haiku.rag.yaml" "$app/haiku.rag.yaml.previous" \
-        "$raycast_ext" "$app/raycast"
+    printf '%s\n' "$plist" "$ingester_plist" "$embed_plist" "$env" "$app/service/haiku.rag" \
+        "$ane" "$launcher" "$app/service/bin/.launcher.c.sha256" \
+        "$app/service/bin/haiku-rag-serve" "$app/service/bin/haiku-rag-reader" \
+        "$app/service/bin/haiku-rag-ingester" "$app/service/service.log" \
+        "$app/service/reader.log" "$app/service/ingester.log" "$app/haiku.rag.yaml" \
+        "$app/haiku.rag.yaml.previous" "$raycast_ext" "$app/raycast"
     [ "$keep_model" = 1 ] || printf '%s\n' "$model" "$model.previous" "$model.new"
     if [ "$delete_index" = 1 ]; then
         printf '%s\n' "$app/files.lancedb" "$app/ingester.db" "$app/ingester.db-shm" \
-            "$app/ingester.db-wal" "$app/folders.yaml" "$app/.folders.yaml.lock"
+            "$app/ingester.db-wal" "$app/databases.d" "$app/folders.yaml" \
+            "$app/folders.yaml.previous" "$app/.folders.yaml.lock"
     fi
     case "$repo" in
         "$app/source") printf '%s\n' "$app/source" ;;
@@ -899,12 +901,14 @@ uninstall() {
     [ "$dry_run" = 0 ] || { dry_run_uninstall; return 0; }
 
     remove_hotkey
-    if [ -f "$plist" ] || [ -d "$env" ] || [ -f "$embed_plist" ] || [ -d "$ane" ]; then
+    if [ -f "$plist" ] || [ -f "$ingester_plist" ] || [ -d "$env" ] || [ -f "$embed_plist" ] \
+        || [ -d "$ane" ]; then
         run_service uninstall >/dev/null
         note "Agents, embedding server and Python environments removed"
     fi
     rm -f "$launcher" "$app/service/bin/.launcher.c.sha256" "$app/service/bin/haiku-rag-serve" \
-        "$app/service/service.log"
+        "$app/service/bin/haiku-rag-reader" "$app/service/bin/haiku-rag-ingester" \
+        "$app/service/service.log" "$app/service/reader.log" "$app/service/ingester.log"
     rmdir "$app/service/bin" "$app/service" 2>/dev/null || true
     rm -f "$app/haiku.rag.yaml" "$app/haiku.rag.yaml.previous"
     if [ -e "$raycast_ext" ] || [ -e "$app/raycast" ]; then
@@ -916,9 +920,9 @@ uninstall() {
         rmdir "$app/models" 2>/dev/null || true
     fi
     if [ "$delete_index" = 1 ]; then
-        rm -rf "$app/files.lancedb"
+        rm -rf "$app/files.lancedb" "$app/databases.d"
         rm -f "$app/ingester.db" "$app/ingester.db-shm" "$app/ingester.db-wal" \
-            "$app/folders.yaml" "$app/.folders.yaml.lock"
+            "$app/folders.yaml" "$app/folders.yaml.previous" "$app/.folders.yaml.lock"
         note "Index, queue and folder list deleted"
     else
         note "Kept the index, the queue and the folder list in $app"

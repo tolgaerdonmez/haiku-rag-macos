@@ -1,0 +1,12 @@
+#!/bin/sh
+# What the launcher runs for the ingester agent: haiku-ingester serve, under
+# haiku-rag-macos, which stops it once it has been idle. Without the embedding
+# model, which the Neural Engine embedding server serves, it exits
+# successfully, which KeepAlive does not restart: indexing needs the model.
+# exec keeps it the launcher's child, holding its Full Disk Access.
+model='@MODEL_DIR@'
+if [ ! -e "$model/model.mlpackage" ] || [ ! -e "$model/tokenizer.json" ]; then
+    echo "haiku-rag-ingester: no embedding model in $model; not starting." >&2
+    exit 0
+fi
+exec '@BIN@/haiku-rag-macos' --config '@CONFIG@' ingester --idle-exit '@INGESTER_IDLE_EXIT@'

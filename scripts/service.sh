@@ -1,27 +1,30 @@
 #!/bin/sh
-# Install and run haiku.rag's local search service on macOS from this checkout.
+# Install and run haiku.rag's local search on macOS from this checkout.
 #
-#   scripts/service.sh install [--folders-seed FILE] [--no-raycast] [--no-karabiner]
+#   scripts/service.sh install [--no-raycast] [--no-karabiner]
 #   scripts/service.sh embedder [--model-from DIR]   # the model and its server
-#   scripts/service.sh status | restart | pause | resume | logs [embedder]
+#   scripts/service.sh status | restart | pause | resume | logs [reader|embedder]
+#   scripts/service.sh folders list | add DIR | remove ID ...   # the indexed folders
 #   scripts/service.sh cli ARGUMENT...   # haiku-rag with the service's config
 #   scripts/service.sh raycast | karabiner   # one install step
 #   scripts/service.sh uninstall
 #
-# install fetches haiku.rag at the pinned commit (haiku_rag_commit below), builds
-# the service's Python environment from it with uv (its uv.lock, non-editable),
-# renders service/ with build.sh and installs it under
-# ~/Library/Application Support/haiku.rag: the launcher (replaced only when
-# launcher.c changes, so its Full Disk Access grant survives), the configuration,
-# the folder register (only if missing), the launchd agent, the Raycast extension
-# (developer-mode registration) and the Karabiner Cmd+Shift+F rule (only if
-# missing). It refuses while a Nix-managed install is present.
+# install builds the Python environment from desktop/ with uv (its uv.lock:
+# haiku.rag from PyPI and haiku-rag-macos, non-editable), renders service/ with
+# build.sh and installs it under ~/Library/Application Support/haiku.rag: the
+# launcher (replaced only when launcher.c changes, so its Full Disk Access
+# grant survives), the configuration, two launchd agents (the search service on
+# its port, and haiku-ingester), the Raycast extension (developer-mode
+# registration) and the Karabiner Cmd+Shift+F rule (only if missing). It
+# imports the folder register of an earlier install (folders.yaml) into
+# databases.d. It refuses while a Nix-managed install is present.
 #
 # embedder installs the Neural Engine embedding server (ane-server/) the service
 # embeds with: the model (from --model-from when it differs), the server's Python
 # environment and its launchd agent, which starts it on the first request.
 #
-# HAIKU_RAG_SERVICE_LABEL, HAIKU_RAG_SERVICE_PORT, HAIKU_RAG_EMBED_LABEL and
+# HAIKU_RAG_SERVICE_LABEL, HAIKU_RAG_SERVICE_PORT (the search service),
+# HAIKU_RAG_INGESTER_LABEL, HAIKU_RAG_INGESTER_PORT, HAIKU_RAG_EMBED_LABEL and
 # HAIKU_RAG_EMBED_PORT override the agents' labels and ports, so a test install
 # under another HOME runs beside the real one; HAIKU_RAG_EMBED_IDLE_EXIT is how
 # long the embedding server stays without a request (seconds, default 300).
@@ -30,24 +33,21 @@
 # install.sh is the interactive installer built on this script.
 set -eu
 
-# The haiku.rag the service runs: this commit of this repository, built with the
-# uv.lock it holds. A full commit id. HAIKU_RAG_RELEASE=VERSION installs that
-# release of haiku.rag from PyPI instead (see the README).
-haiku_rag_repo=${HAIKU_RAG_REPO:-https://github.com/tolgaerdonmez/haiku.rag.git}
-haiku_rag_commit=${HAIKU_RAG_COMMIT:-327e03525e7a3b8ee4d26f15cf28fc63113c7ece}
-haiku_rag_release=${HAIKU_RAG_RELEASE:-}
-
 repo=$(cd "$(dirname "$0")/.." && pwd)
 app="$HOME/Library/Application Support/haiku.rag"
 service="$app/service"
 env="$service/env"
-src="$service/haiku.rag"
+fragments="$app/databases.d"
 model="$app/models/jina-nano-coreml"
 ane="$app/ane-server"
 label=${HAIKU_RAG_SERVICE_LABEL:-com.haiku-rag.service}
 plist="$HOME/Library/LaunchAgents/$label.plist"
 job="gui/$(id -u)/$label"
 port=${HAIKU_RAG_SERVICE_PORT:-8765}
+ingester_label=${HAIKU_RAG_INGESTER_LABEL:-com.haiku-rag.ingester}
+ingester_plist="$HOME/Library/LaunchAgents/$ingester_label.plist"
+ingester_job="gui/$(id -u)/$ingester_label"
+ingester_port=${HAIKU_RAG_INGESTER_PORT:-8766}
 embed_label=${HAIKU_RAG_EMBED_LABEL:-com.haiku-rag.ane-server}
 embed_plist="$HOME/Library/LaunchAgents/$embed_label.plist"
 embed_job="gui/$(id -u)/$embed_label"
@@ -77,11 +77,16 @@ stop() {
     ! loaded "$1" || die "$1 did not unload within 150 s"
     ! running "$2" || die "processes still running after 150 s: $(/usr/bin/pgrep -f -- "$2" | tr '\n' ' ')"
 }
-stop_agent() { stop "$job" "$env/bin/"; }
+# The search service and the ingester share the environment: stop both.
+stop_agent() {
+    if loaded "$job"; then /bin/launchctl bootout "$job" 2>/dev/null || true; fi
+    stop "$ingester_job" "$env/bin/"
+}
 stop_embedder() { stop "$embed_job" "$ane/env/bin/"; }
 
 start_agent() {
     /bin/launchctl bootstrap "gui/$(id -u)" "$plist"
+    /bin/launchctl bootstrap "gui/$(id -u)" "$ingester_plist"
 }
 
 refuse_nix_install() {
@@ -93,41 +98,16 @@ refuse_nix_install() {
     fi
 }
 
-# haiku.rag's source at the pinned commit, in $src.
-fetch_haiku_rag() {
-    command -v git >/dev/null || die "git not found"
-    case "$haiku_rag_commit" in
-        *[!0-9a-f]*) die "HAIKU_RAG_COMMIT must be a full commit id: $haiku_rag_commit" ;;
-    esac
-    [ ${#haiku_rag_commit} -eq 40 ] || die "HAIKU_RAG_COMMIT must be a full commit id: $haiku_rag_commit"
-    if [ "$(git -C "$src" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null || true)" = "$haiku_rag_commit" ] \
-        && [ -z "$(git -C "$src" status --porcelain 2>/dev/null)" ]; then
-        return 0
-    fi
-    say "haiku.rag: fetching $(printf '%.10s' "$haiku_rag_commit") from $haiku_rag_repo"
-    if [ ! -d "$src/.git" ]; then
-        rm -rf "$src"
-        git init --quiet "$src"
-    fi
-    git -C "$src" fetch --quiet --depth 1 "$haiku_rag_repo" "$haiku_rag_commit" \
-        || die "could not fetch $haiku_rag_commit from $haiku_rag_repo"
-    git -C "$src" -c advice.detachedHead=false checkout --quiet --force --detach FETCH_HEAD
-    git -C "$src" clean --quiet -fdx
-}
-
+# haiku.rag from PyPI and haiku-rag-macos (desktop/), at the versions its
+# uv.lock pins: the package set haiku.rag's release was tested with.
 install_env() {
     command -v uv >/dev/null || die "uv not found"
+    say "Python environment: $env (desktop/uv.lock)"
     # A uv-managed CPython: an interpreter from a profile on PATH can change under the environment.
-    if [ -n "$haiku_rag_release" ]; then
-        say "Python environment: $env (haiku.rag $haiku_rag_release from PyPI)"
-        uv venv --quiet --clear --managed-python --python 3.13 "$env"
-        uv pip install --quiet --python "$env/bin/python" "haiku.rag[ingester]==$haiku_rag_release"
-        return 0
-    fi
-    fetch_haiku_rag
-    say "Python environment: $env (haiku.rag $(printf '%.10s' "$haiku_rag_commit"))"
-    UV_PROJECT_ENVIRONMENT="$env" uv sync --project "$src" --frozen --no-dev \
-        --no-editable --managed-python --extra ingester --quiet
+    UV_PROJECT_ENVIRONMENT="$env" uv sync --project "$repo/desktop" --frozen --no-dev \
+        --no-editable --managed-python --python 3.13 --quiet
+    # An earlier install built haiku.rag from a fork's source here.
+    rm -rf "$service/haiku.rag"
 }
 
 install_ane_env() {
@@ -141,9 +121,10 @@ install_ane_env() {
 render() {
     rendered=$(mktemp -d)
     trap 'rm -rf "$rendered"' EXIT
-    "$repo/service/build.sh" --out "$rendered" --ingester "$env/bin/haiku-ingester" \
+    "$repo/service/build.sh" --out "$rendered" --bin "$env/bin" \
         --ane-server "$ane/env/bin/haiku-rag-ane-server" --app-dir "$app" --cache-dir "$cache" \
-        --port "$port" --label "$label" --embed-port "$embed_port" \
+        --port "$port" --label "$label" --ingester-port "$ingester_port" \
+        --ingester-label "$ingester_label" --embed-port "$embed_port" \
         --embed-label "$embed_label" --idle-exit "$idle_exit" >/dev/null
 }
 
@@ -171,10 +152,20 @@ install_config() {
         say "Configuration: replaced, previous kept as haiku.rag.yaml.previous"
     fi
     install -m 644 "$rendered/haiku.rag.yaml" "$target"
-    if [ ! -e "$app/folders.yaml" ]; then
-        install -m 644 "${folders_seed:-$rendered/folders.yaml}" "$app/folders.yaml"
-        say "Folder register: seeded"
-    fi
+    mkdir -p "$fragments"
+}
+
+macos() { HAIKU_RAG_CONFIG_PATH="$app/haiku.rag.yaml" "$env/bin/haiku-rag-macos" "$@"; }
+
+# The folder register of an earlier install, folders.yaml, becomes the
+# fragments in databases.d, with the same folder ids, so every indexed document
+# keeps its folder. The old file stays as folders.yaml.previous.
+migrate_register() {
+    [ -f "$app/folders.yaml" ] || return 0
+    say "Folder register: moving folders.yaml into databases.d"
+    macos migrate-register "$app/folders.yaml" | sed 's/^/  /'
+    mv "$app/folders.yaml" "$app/folders.yaml.previous"
+    rm -f "$app/.folders.yaml.lock"
 }
 
 # An index written by haiku.rag's in-process coreml embedder (an earlier version of
@@ -353,12 +344,10 @@ EOF
 }
 
 install_all() {
-    folders_seed=
     raycast=1
     karabiner=1
     while [ $# -gt 0 ]; do
         case "$1" in
-            --folders-seed) folders_seed=$2; shift 2 ;;
             --no-raycast) raycast=0; shift ;;
             --no-karabiner) karabiner=0; shift ;;
             *) die "unknown option: $1" ;;
@@ -371,14 +360,21 @@ install_all() {
     install_env
     render
     install_launcher
-    install -m 755 "$rendered/bin/haiku-rag-serve" "$service/bin/haiku-rag-serve"
+    for script in haiku-rag-reader haiku-rag-ingester; do
+        install -m 755 "$rendered/bin/$script" "$service/bin/$script"
+    done
+    # The earlier single service: its command and log.
+    rm -f "$service/bin/haiku-rag-serve" "$service/service.log"
     install_config
+    migrate_register
     adopt_embedder
     install_model
     [ -f "$embed_plist" ] || say "Embedding server: not installed; the service embeds with it. Install it: $0 embedder"
     install -m 644 "$rendered/com.haiku-rag.service.plist" "$plist"
+    install -m 644 "$rendered/com.haiku-rag.ingester.plist" "$ingester_plist"
     start_agent
-    say "Agent: $label loaded (127.0.0.1:$port, log $service/service.log)"
+    say "Agents: $label (search, 127.0.0.1:$port, log $service/reader.log) and"
+    say "  $ingester_label (haiku-ingester, API 127.0.0.1:$ingester_port, log $service/ingester.log) loaded"
     [ "$raycast" = 0 ] || install_raycast
     [ "$karabiner" = 0 ] || install_karabiner
 }
@@ -387,8 +383,13 @@ case "${1:-}" in
     install) shift; install_all "$@" ;;
     embedder) shift; install_embedder "$@" ;;
     status)
+        if loaded "$ingester_job"; then
+            say "ingester:"
+            /bin/launchctl print "$ingester_job" | grep -E '^[[:space:]]*(state|pid|last exit code) =' || true
+        else
+            say "ingester: not loaded (paused or not installed)"
+        fi
         if loaded "$job"; then
-            /bin/launchctl print "$job" | grep -E '^[[:space:]]*(state|pid|last exit code) =' || true
             /usr/bin/curl -fsS --max-time 30 "http://127.0.0.1:$port/status" && echo
         else
             say "search service: not loaded (paused or not installed)"
@@ -403,13 +404,20 @@ case "${1:-}" in
             say "embedding server: not loaded (not installed)"
         fi ;;
     restart)
-        /bin/launchctl kickstart -k "$job"
+        /bin/launchctl kickstart -k "$ingester_job"
+        /bin/launchctl kill TERM "$job" 2>/dev/null || true
         if running "$ane/env/bin/"; then /bin/launchctl kill TERM "$embed_job" 2>/dev/null || true; fi ;;
     pause) stop_agent; say "stopped until the next login or '$0 resume'" ;;
-    resume) start_agent; say "loaded; starts now (RunAtLoad) and on the next request" ;;
+    resume) start_agent; say "loaded; the ingester starts now, the search service on the next request" ;;
     logs)
-        if [ "${2:-}" = embedder ]; then exec tail -n 100 -f "$ane/ane-server.log"; fi
-        exec tail -n 100 -f "$service/service.log" ;;
+        case "${2:-}" in
+            embedder) exec tail -n 100 -f "$ane/ane-server.log" ;;
+            reader) exec tail -n 100 -f "$service/reader.log" ;;
+        esac
+        exec tail -n 100 -f "$service/ingester.log" ;;
+    folders)
+        shift
+        macos folders "$@" ;;
     cli)
         shift
         HAIKU_RAG_CONFIG_PATH="$app/haiku.rag.yaml" HF_HOME="$cache/huggingface" \
@@ -419,12 +427,13 @@ case "${1:-}" in
     uninstall)
         stop_agent
         stop_embedder
-        rm -f "$plist" "$embed_plist" "$service/bin/haiku-rag-serve"
-        rm -rf "$env" "$src" "$ane"
+        rm -f "$plist" "$ingester_plist" "$embed_plist" "$service/bin/haiku-rag-serve" \
+            "$service/bin/haiku-rag-reader" "$service/bin/haiku-rag-ingester"
+        rm -rf "$env" "$service/haiku.rag" "$ane"
         say "Removed the agents, the embedding server and the Python environment. Kept: the"
         say "launcher (its Full Disk Access grant), the configuration, folders, model, index and"
         say "queue in $app, the Raycast extension and the Karabiner rule." ;;
     *)
-        sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' >&2
+        sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2
         exit 64 ;;
 esac

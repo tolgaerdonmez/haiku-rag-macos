@@ -1,6 +1,6 @@
 import { BoundingBox, Failure, IndexedFolder, SearchHit, SearchResult, ServiceStatus } from "./types";
 
-/** Wire shapes of docs/local-search-api.md. Unknown fields are ignored. */
+/** Wire shapes of docs/search-api.md. Unknown fields are ignored. */
 export interface WireBox {
   left: number;
   top: number;

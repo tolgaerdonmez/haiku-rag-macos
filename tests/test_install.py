@@ -21,6 +21,8 @@ RULE = "Cmd+Shift+F opens haiku.rag Search Documents in Raycast"
 TEST_ENV = {
     "HAIKU_RAG_SERVICE_LABEL": "com.haiku-rag.service.pytest",
     "HAIKU_RAG_SERVICE_PORT": "18799",
+    "HAIKU_RAG_INGESTER_LABEL": "com.haiku-rag.ingester.pytest",
+    "HAIKU_RAG_INGESTER_PORT": "18797",
     "HAIKU_RAG_EMBED_LABEL": "com.haiku-rag.ane-server.pytest",
     "HAIKU_RAG_EMBED_PORT": "18798",
 }
@@ -168,7 +170,7 @@ def unload_test_agents():
     """Boots out the agents a test loaded, whatever happened."""
     yield
     uid = os.getuid()
-    for key in ("HAIKU_RAG_SERVICE_LABEL", "HAIKU_RAG_EMBED_LABEL"):
+    for key in ("HAIKU_RAG_SERVICE_LABEL", "HAIKU_RAG_INGESTER_LABEL", "HAIKU_RAG_EMBED_LABEL"):
         subprocess.run(
             ["/bin/launchctl", "bootout", f"gui/{uid}/{TEST_ENV[key]}"],
             capture_output=True,
@@ -181,14 +183,15 @@ def test_scripts_parse(script):
 
 
 @macos_only
-def test_build_renders_both_agents_and_the_openai_embedder(tmp_path):
+def test_build_renders_the_agents_and_the_openai_embedder(tmp_path):
     out = tmp_path / "out"
     app = tmp_path / "app"
     subprocess.run(
         [
-            "/bin/sh", str(BUILD), "--out", str(out), "--ingester", "/x/haiku-ingester",
+            "/bin/sh", str(BUILD), "--out", str(out), "--bin", "/x/env/bin",
             "--ane-server", "/x/haiku-rag-ane-server", "--app-dir", str(app),
-            "--port", "18799", "--embed-port", "18798", "--idle-exit", "42",
+            "--port", "18799", "--ingester-port", "18797", "--ingester-label", "test.ingester",
+            "--embed-port", "18798", "--idle-exit", "42",
         ],
         check=True,
         capture_output=True,
@@ -200,7 +203,11 @@ def test_build_renders_both_agents_and_the_openai_embedder(tmp_path):
     assert 'query_prefix: "Query: "' in config
     assert 'document_prefix: "Document: "' in config
     assert "chunk_size: 1024" in config
-    assert "port: 18799" in config
+    assert "port: 18797" in config
+    assert "databases_include: ${HOME}/Library/Application Support/haiku.rag/databases.d" in config
+    assert "name: macos-folders" in config
+    assert "extract_pdf_attachments: false" in config
+    assert "conversion_timeout: 300" in config
     assert "@" not in config
     ane = (out / "com.haiku-rag.ane-server.plist").read_text(encoding="utf-8")
     for text in (
@@ -212,13 +219,40 @@ def test_build_renders_both_agents_and_the_openai_embedder(tmp_path):
     ):
         assert text in ane
     assert "<key>RunAtLoad</key>" not in ane and "<key>KeepAlive</key>" not in ane
-    service = (out / "com.haiku-rag.service.plist").read_text(encoding="utf-8")
     cache = Path.home() / "Library" / "Caches" / "haiku.rag"
-    assert f"<key>HF_HOME</key>\n        <string>{cache}/huggingface</string>" in service
-    assert f"<key>DOCLING_CACHE_DIR</key>\n        <string>{cache}/docling</string>" in service
+    # The search service: on demand on its port, through the launcher.
+    reader = (out / "com.haiku-rag.service.plist").read_text(encoding="utf-8")
+    assert "<string>18799</string>" in reader
+    assert f"<string>{app}/service/bin/haiku-rag-reader</string>" in reader
+    assert "<key>RunAtLoad</key>" not in reader and "<key>KeepAlive</key>" not in reader
+    # The ingester: at login, hourly and on folder changes, restarted unless idle.
+    ingester = (out / "com.haiku-rag.ingester.plist").read_text(encoding="utf-8")
+    assert "<string>test.ingester</string>" in ingester
+    assert f"<string>{app}/service/bin/haiku-rag-ingester</string>" in ingester
+    assert f"<string>{app}/databases.d</string>" in ingester
+    assert "<key>SuccessfulExit</key>\n        <false/>" in ingester
+    assert "<key>Sockets</key>" not in ingester
+    assert f"<key>HF_HOME</key>\n        <string>{cache}/huggingface</string>" in ingester
+    assert f"<key>DOCLING_CACHE_DIR</key>\n        <string>{cache}/docling</string>" in ingester
+    reader_script = (out / "bin" / "haiku-rag-reader").read_text(encoding="utf-8")
+    assert "'/x/env/bin/haiku-rag-macos' --config" in reader_script
+    assert "reader --ingester-label 'test.ingester'" in reader_script
+    ingester_script = (out / "bin" / "haiku-rag-ingester").read_text(encoding="utf-8")
+    assert "ingester --idle-exit '600'" in ingester_script
     assert (out / "launcher.c.sha256").read_text().strip() == hashlib.sha256(
         (ROOT / "service" / "launcher.c").read_bytes()
     ).hexdigest()
+
+
+@macos_only
+def test_build_takes_the_older_ingester_option(tmp_path):
+    out = tmp_path / "out"
+    subprocess.run(
+        ["/bin/sh", str(BUILD), "--out", str(out), "--ingester", "/y/bin/haiku-ingester"],
+        check=True,
+        capture_output=True,
+    )
+    assert "'/y/bin/haiku-rag-macos'" in (out / "bin" / "haiku-rag-reader").read_text()
 
 
 @macos_only
@@ -310,8 +344,11 @@ def test_uninstall_keeps_the_index_and_indexed_files(tmp_path):
         "files.lancedb/data.lance",
         "ingester.db",
         "folders.yaml",
+        "databases.d/files.yaml",
         "haiku.rag.yaml",
         "models/jina-nano-coreml/tokenizer.json",
+        "service/bin/haiku-rag-reader",
+        "service/ingester.log",
         "service/bin/haiku-rag-service",
         "service/haiku.rag/pyproject.toml",
         "ane-server/env/bin/haiku-rag-ane-server",
@@ -329,6 +366,7 @@ def test_uninstall_keeps_the_index_and_indexed_files(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert sorted(p.name for p in app.iterdir()) == [
+        "databases.d",
         "files.lancedb",
         "folders.yaml",
         "ingester.db",
@@ -421,6 +459,8 @@ def test_uninstall_deletes_the_index_only_when_asked(tmp_path):
     app = app_dir(home)
     (app / "files.lancedb").mkdir(parents=True)
     (app / "folders.yaml").write_text("folders: []\n", encoding="utf-8")
+    (app / "databases.d").mkdir()
+    (app / "databases.d" / "files.yaml").write_text("{}\n", encoding="utf-8")
 
     result = run(home, "--uninstall", "--yes", "--delete-index")
 
