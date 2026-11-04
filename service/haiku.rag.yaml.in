@@ -21,7 +21,6 @@ embeddings:
 processing:
   chunk_size: 1024                # the model's longest function is 2048 tokens
   pictures: none
-  extract_pdf_attachments: false  # PowerPoint PDFs embed their equations as MathML .xml files
   conversion_options:
     ocr_engine: ocrmac            # Apple Vision; RapidOCR is the retry
     table_mode: fast
@@ -52,6 +51,6 @@ ingester:
       max_load: 1.2               # per core, sized for 8 conversion processes of 2 threads
       min_free_memory_percent: 10
     vacuum_after_indexing:
-      min_documents: 50           # once the queue drains after this many documents; null never
+      min_documents: 50           # once the queue drains after this many documents; haiku.rag leaves it off (null)
       quiet_s: 60
       retention_seconds: 0        # drop every old version, so the index shrinks to its live size

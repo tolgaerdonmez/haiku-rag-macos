@@ -167,7 +167,8 @@ The model expects the prefixes `Query: ` and `Document: `; haiku.rag adds them
 
 The service runs haiku.rag from
 [tolgaerdonmez/haiku.rag](https://github.com/tolgaerdonmez/haiku.rag), a fork
-carrying the local search service, until those changes are released upstream.
+that is upstream main plus three pull requests open there (fixes, supervised
+conversion and the local search service), until those are released upstream.
 `scripts/service.sh` pins it to one commit, `haiku_rag_commit`, fetches that commit
 and builds the environment with the `uv.lock` it holds, so every install gets the
 same packages. `HAIKU_RAG_COMMIT` (a full commit id) and `HAIKU_RAG_REPO` install

@@ -32,7 +32,7 @@ set -eu
 # uv.lock it holds. A full commit id. HAIKU_RAG_RELEASE=VERSION installs that
 # release of haiku.rag from PyPI instead (see the README).
 haiku_rag_repo=${HAIKU_RAG_REPO:-https://github.com/tolgaerdonmez/haiku.rag.git}
-haiku_rag_commit=${HAIKU_RAG_COMMIT:-ea493258848442f82c99da6f9f21ddefc4c90033}
+haiku_rag_commit=${HAIKU_RAG_COMMIT:-327e03525e7a3b8ee4d26f15cf28fc63113c7ece}
 haiku_rag_release=${HAIKU_RAG_RELEASE:-}
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
