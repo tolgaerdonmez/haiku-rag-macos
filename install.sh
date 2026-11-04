@@ -4,6 +4,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/tolgaerdonmez/haiku-rag-macos/main/install.sh | sh
 #   ./install.sh [--yes] [--dry-run] [component options]
 #   ./install.sh --uninstall [--yes] [--dry-run] [--delete-index] [--keep-model] [--purge]
+#   ./install.sh --update [--ref REF] [--dry-run]   # snapshot, update, check, roll back on failure
+#   ./install.sh --rollback [--yes]                 # back to the latest snapshot and its version
 #
 # Components (recommended ones are preselected):
 #   --service / --no-service   background search service: launchd agent and launcher
@@ -25,8 +27,21 @@
 #   --uninstall                remove what this installer installs; the index is
 #                              kept unless --delete-index, indexed files are never touched
 #   --purge                    with --uninstall, also delete the caches: uv's packages and
-#                              docling's models in ~/Library/Caches/haiku.rag, and the
-#                              Raycast extension's page previews
+#                              docling's models in ~/Library/Caches/haiku.rag, the
+#                              Raycast extension's page previews, and the update snapshots
+# Updating:
+#   --update                   update what is installed to the latest version: snapshot the
+#                              index, queue, folder list and configuration (an APFS clone,
+#                              instant and taking no extra disk), fetch the version into the
+#                              source checkout, install the components installed now, then
+#                              check that the agents are loaded, no document went missing and
+#                              a test search answers. If the install or the check fails, it
+#                              restores the snapshot and reinstalls the version before
+#                              (HAIKU_RAG_MACOS_REPO and HAIKU_RAG_MACOS_REF as below)
+#   --ref REF                  with --update, the branch, tag or commit to update to
+#   --rollback                 restore the latest snapshot and reinstall the version it was
+#                              taken from. The last 2 snapshots are kept, in
+#                              ~/Library/Application Support/haiku.rag/snapshots
 #
 # Run from a checkout it installs that checkout. Run on its own (piped to sh) it
 # clones this repository, or updates the clone, in HAIKU_RAG_MACOS_SOURCE (default
@@ -67,6 +82,9 @@ raycast_support="$HOME/Library/Application Support/com.raycast.macos/extensions/
 # models the service downloads (service/com.haiku-rag.service.plist.in). The caches
 # in ~/.cache are shared with other tools, so --purge could not tell what is ours.
 cache="$HOME/Library/Caches/haiku.rag"
+# The version installed (see record_install) and the snapshots --update takes.
+record="$app/installed.info"
+snapshots="$app/snapshots"
 UV_CACHE_DIR="$cache/uv"
 export UV_CACHE_DIR
 karabiner_json="$HOME/.config/karabiner/karabiner.json"
@@ -88,6 +106,8 @@ uninstall=0
 delete_index=0
 keep_model=0
 purge=0
+update=0
+rollback=0
 want_service=
 want_model=
 want_raycast=
@@ -115,6 +135,11 @@ parse_options() {
             --delete-index) delete_index=1 ;;
             --keep-model) keep_model=1 ;;
             --purge) purge=1 ;;
+            --update) update=1 ;;
+            --rollback) rollback=1 ;;
+            --ref)
+                [ $# -ge 2 ] || die "--ref needs a branch, tag or commit"
+                repo_ref=$2; shift ;;
             --service) want_service=1 ;;
             --no-service) want_service=0 ;;
             --model) want_model=1 ;;
@@ -242,14 +267,30 @@ bootstrap() {
     exec /bin/sh "$source_dir/install.sh" "$@"
 }
 
+parse_options "$@"
+case "$update$rollback$uninstall" in
+    000 | 100 | 010 | 001) ;;
+    *) die "--update, --rollback and --uninstall go alone" ;;
+esac
+
+# Updating checks a version out over the source checkout, which may hold this very
+# script while the shell still reads it: run a copy instead. The copy has no
+# checkout around it, which updating does not need.
+if [ "$update$rollback" != 00 ] && [ -z "${HAIKU_RAG_INSTALL_COPY:-}" ] && [ -f "${0:-}" ]; then
+    HAIKU_RAG_INSTALL_COPY=$(mktemp "${TMPDIR:-/tmp}/haiku-rag-install.sh.XXXXXX")
+    cp "$0" "$HAIKU_RAG_INSTALL_COPY"
+    export HAIKU_RAG_INSTALL_COPY
+    exec /bin/sh "$HAIKU_RAG_INSTALL_COPY" "$@"
+fi
+
 repo=
-if [ -f "${0:-}" ]; then
+if [ -f "${0:-}" ] && [ -z "${HAIKU_RAG_INSTALL_COPY:-}" ]; then
     here=$(cd "$(dirname "$0")" && pwd)
     if [ -f "$here/scripts/service.sh" ] && [ -f "$here/service/build.sh" ]; then
         repo=$here
     fi
 fi
-[ -n "$repo" ] || bootstrap "$@"
+[ -n "$repo" ] || [ "$update$rollback" != 00 ] || bootstrap "$@"
 service_sh="$repo/scripts/service.sh"
 
 # --- what is on this Mac -----------------------------------------------------
@@ -532,7 +573,14 @@ check_space() {
 # --- the model ---------------------------------------------------------------
 
 work=
-cleanup() { [ -z "$work" ] || rm -rf "$work"; }
+cleanup() {
+    status=$?
+    [ -z "$work" ] || rm -rf "$work"
+    [ -z "${HAIKU_RAG_INSTALL_COPY:-}" ] || rm -f "$HAIKU_RAG_INSTALL_COPY"
+    if [ "$status" != 0 ] && [ -n "${updating:-}" ]; then
+        printf '\nhaiku-rag-macos: the update stopped before it finished. The snapshot taken first is in\n  %s\nRestore it and the version before with: install.sh --rollback\n' "$updating" >&2
+    fi
+}
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
@@ -778,6 +826,7 @@ summary() {
         note "Pause:      $service_sh pause    (resume: $service_sh resume)"
         note "Status:     $service_sh status    (log: $service_sh logs)"
     fi
+    note "Update:     $repo/install.sh --update    (back again: --rollback)"
     note "Uninstall:  $repo/install.sh --uninstall"
     note "Docs:       https://github.com/tolgaerdonmez/haiku-rag-macos#readme"
 }
@@ -808,6 +857,7 @@ install() {
     fi
     launcher_before=$(shasum -a 256 "$launcher" 2>/dev/null || true)
     install_steps
+    record_install
     if service_installed; then
         if [ "$launcher_before" = "$(shasum -a 256 "$launcher" 2>/dev/null || true)" ]; then
             full_disk_access n
@@ -854,7 +904,7 @@ removal_paths() {
         "$app/service/bin/haiku-rag-serve" "$app/service/bin/haiku-rag-reader" \
         "$app/service/bin/haiku-rag-ingester" "$app/service/service.log" \
         "$app/service/reader.log" "$app/service/ingester.log" "$app/haiku.rag.yaml" \
-        "$app/haiku.rag.yaml.previous" "$raycast_ext" "$app/raycast"
+        "$app/haiku.rag.yaml.previous" "$raycast_ext" "$app/raycast" "$record"
     [ "$keep_model" = 1 ] || printf '%s\n' "$model" "$model.previous" "$model.new"
     if [ "$delete_index" = 1 ]; then
         printf '%s\n' "$app/files.lancedb" "$app/ingester.db" "$app/ingester.db-shm" \
@@ -864,7 +914,7 @@ removal_paths() {
     case "$repo" in
         "$app/source") printf '%s\n' "$app/source" ;;
     esac
-    [ "$purge" = 0 ] || printf '%s\n' "$cache" "$raycast_support"
+    [ "$purge" = 0 ] || printf '%s\n' "$cache" "$raycast_support" "$snapshots"
 }
 
 # size_kb PATH...: the disk the existing ones take, in KB.
@@ -890,13 +940,13 @@ uninstall() {
     heading "Uninstall"
     note "Removes the agents, launcher, Python environments, embedding server, configuration,"
     note "Raycast extension, Cmd+Shift+F rule$( [ "$keep_model" = 1 ] || printf ', model') and the fetched sources in $app."
-    [ "$purge" = 0 ] || note "With --purge also the caches in $cache and the Raycast page previews."
+    [ "$purge" = 0 ] || note "With --purge also the caches in $cache, the Raycast page previews and the update snapshots."
     note "Indexed folders and their files are never touched."
     if [ "$interactive" = 1 ]; then
         ask "Uninstall?" y || exit 0
         [ "$delete_index" = 1 ] || ! ask "Also delete the index, the queue and the folder list?" n || delete_index=1
         [ "$keep_model" = 1 ] || ask "Also delete the embedding model ($(human_kb $size_model))?" y || keep_model=1
-        [ "$purge" = 1 ] || ! ask "Also delete the caches: downloaded packages and document models, Raycast page previews ($(human_kb "$(size_kb "$cache" "$raycast_support")"))?" n || purge=1
+        [ "$purge" = 1 ] || ! ask "Also delete the caches: downloaded packages and document models, Raycast page previews, update snapshots ($(human_kb "$(size_kb "$cache" "$raycast_support" "$snapshots")"))?" n || purge=1
     fi
     [ "$dry_run" = 0 ] || { dry_run_uninstall; return 0; }
 
@@ -910,7 +960,7 @@ uninstall() {
         "$app/service/bin/haiku-rag-reader" "$app/service/bin/haiku-rag-ingester" \
         "$app/service/service.log" "$app/service/reader.log" "$app/service/ingester.log"
     rmdir "$app/service/bin" "$app/service" 2>/dev/null || true
-    rm -f "$app/haiku.rag.yaml" "$app/haiku.rag.yaml.previous"
+    rm -f "$app/haiku.rag.yaml" "$app/haiku.rag.yaml.previous" "$record"
     if [ -e "$raycast_ext" ] || [ -e "$app/raycast" ]; then
         rm -rf "$raycast_ext" "$app/raycast"
         note "Raycast extension removed (if Raycast still lists it: Settings > Extensions > Haiku RAG > Remove)"
@@ -930,24 +980,343 @@ uninstall() {
     case "$repo" in
         "$app/source") rm -rf "$app/source" ;;
     esac
-    rmdir "$app" 2>/dev/null || true
     if [ "$purge" = 1 ]; then
-        rm -rf "$cache" "$raycast_support"
-        note "Caches deleted: $cache and the Raycast page previews"
+        rm -rf "$cache" "$raycast_support" "$snapshots"
+        note "Caches deleted: $cache, the Raycast page previews and the update snapshots"
+    elif [ -d "$snapshots" ]; then
+        note "Kept the update snapshots in $snapshots (--purge deletes them)"
     fi
+    rmdir "$app" 2>/dev/null || true
     note "Remove haiku-rag-service from System Settings > Privacy & Security > Full Disk Access."
+}
+
+# --- updating ----------------------------------------------------------------
+
+# record_install: notes the commit just installed, which --update rolls back to.
+record_install() {
+    commit=$(git -C "$repo" rev-parse --verify --quiet HEAD 2>/dev/null) || return 0
+    dirty=0
+    [ -z "$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)" ] || dirty=1
+    write_record "$commit" "$repo" "$dirty"
+}
+
+# write_record COMMIT SOURCE [DIRTY]
+write_record() {
+    mkdir -p "$app"
+    printf 'commit=%s\nsource=%s\ndirty=%s\ninstalled=%s\n' "$1" "$2" "${3:-0}" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$record.new"
+    mv -f "$record.new" "$record"
+}
+
+# info_get FILE KEY: a key=value from a record or a snapshot's snapshot.info.
+info_get() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n 1; }
+
+# The files a snapshot holds: the index, the queue, the folder register (the
+# earlier folders.yaml and today's databases.d) and the configuration.
+data_items="files.lancedb ingester.db ingester.db-wal ingester.db-shm folders.yaml
+folders.yaml.previous .folders.yaml.lock databases.d haiku.rag.yaml haiku.rag.yaml.previous"
+keep_snapshots=2
+
+uid=$(id -u)
+agent_loaded() { /bin/launchctl print "gui/$uid/$1" >/dev/null 2>&1; }
+
+# Stops the search service and the ingester, which write the index and the queue,
+# and waits for their processes to exit.
+stop_data_agents() {
+    for l in "$label" "$ingester_label"; do
+        if agent_loaded "$l"; then /bin/launchctl bootout "gui/$uid/$l" 2>/dev/null || true; fi
+    done
+    i=0
+    while { agent_loaded "$label" || agent_loaded "$ingester_label" \
+        || /usr/bin/pgrep -f -- "$env/bin/" >/dev/null; } && [ $i -lt 150 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    [ $i -lt 150 ] || die "the search service or the ingester did not stop within 150 s"
+}
+
+start_data_agents() {
+    for p in "$plist" "$ingester_plist"; do
+        l=$(basename "$p" .plist)
+        [ -f "$p" ] && ! agent_loaded "$l" || continue
+        /bin/launchctl bootstrap "gui/$uid" "$p" 2>/dev/null || warn "could not load $p"
+    done
+}
+
+# Takes the agents out entirely, for a version that may not have them all.
+remove_agents() {
+    stop_data_agents
+    if agent_loaded "$embed_label"; then /bin/launchctl bootout "gui/$uid/$embed_label" 2>/dev/null || true; fi
+    rm -f "$plist" "$ingester_plist" "$embed_plist"
+}
+
+# snapshot COMMIT SOURCE DOCUMENTS: copies the data items into a new snapshot
+# directory, an APFS clone where the disk allows it, and prints its path.
+snapshot() {
+    name=$(date +%Y%m%d-%H%M%S)
+    dir="$snapshots/$name"
+    n=1
+    while [ -e "$dir" ]; do dir="$snapshots/$name-$n"; n=$((n + 1)); done
+    mkdir -p "$dir.partial"
+    for item in $data_items; do
+        [ -e "$app/$item" ] || continue
+        if ! /bin/cp -cpR "$app/$item" "$dir.partial/" 2>/dev/null; then
+            rm -rf "${dir:?}.partial/$item"
+            /bin/cp -pR "$app/$item" "$dir.partial/" \
+                || { rm -rf "$dir.partial"; die "could not copy $app/$item into the snapshot"; }
+        fi
+    done
+    printf 'commit=%s\nsource=%s\ndocuments=%s\ntaken=%s\n' "$1" "$2" "$3" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$dir.partial/snapshot.info"
+    mv "$dir.partial" "$dir"
+    printf '%s' "$dir"
+}
+
+# Keeps the newest keep_snapshots snapshots.
+prune_snapshots() {
+    [ -d "$snapshots" ] || return 0
+    rm -rf "$snapshots"/*.partial
+    ls -1 "$snapshots" | LC_ALL=C sort -r | sed "1,${keep_snapshots}d" | while IFS= read -r old; do
+        [ -n "$old" ] || continue
+        rm -rf "${snapshots:?}/$old"
+        note "Snapshot $old deleted (the last $keep_snapshots are kept)"
+    done
+}
+
+latest_snapshot() {
+    [ -d "$snapshots" ] || return 1
+    last=$(ls -1 "$snapshots" | grep -v '\.partial$' | LC_ALL=C sort | tail -n 1)
+    [ -n "$last" ] && [ -f "$snapshots/$last/snapshot.info" ] || return 1
+    printf '%s' "$snapshots/$last"
+}
+
+# restore SNAPSHOT: the data items exactly as the snapshot holds them; items it
+# does not hold (a later version's) are removed. The agents must be stopped.
+restore() {
+    for item in $data_items; do
+        rm -rf "${app:?}/$item"
+        [ -e "$1/$item" ] || continue
+        /bin/cp -cpR "$1/$item" "$app/" 2>/dev/null || /bin/cp -pR "$1/$item" "$app/" \
+            || die "could not restore $item from $1"
+    done
+}
+
+# The source checkout --update installs from, made ready to fetch into.
+prepare_source() {
+    if [ -d "$source_dir/.git" ]; then
+        [ -z "$(git -C "$source_dir" status --porcelain)" ] \
+            || die "$source_dir has local changes; commit or remove them, or set HAIKU_RAG_MACOS_SOURCE"
+        if [ -f "$source_dir/haiku_rag_slim/pyproject.toml" ]; then
+            say "  replacing the haiku.rag clone an earlier installer made there"
+            rm -rf "$source_dir"
+        fi
+    fi
+    if [ ! -d "$source_dir/.git" ]; then
+        [ ! -e "$source_dir" ] || die "$source_dir exists and is not a git checkout"
+        mkdir -p "$source_dir"
+        git init --quiet "$source_dir"
+    fi
+}
+
+# fetch URL REF: fetches REF (a branch, tag or commit) and prints its commit.
+fetch() {
+    git -C "$source_dir" fetch --quiet --depth 1 "$1" "$2" </dev/null || return 1
+    git -C "$source_dir" rev-parse FETCH_HEAD
+}
+
+# checkout_commit COMMIT SOURCE: checks COMMIT out in the source checkout,
+# fetching it from SOURCE (a checkout it came from) or the repository if needed.
+checkout_commit() {
+    if ! git -C "$source_dir" cat-file -e "$1^{commit}" 2>/dev/null; then
+        if [ -n "$2" ] && [ "$2" != "$source_dir" ] && [ -d "$2/.git" ]; then
+            fetch "$2" "$1" >/dev/null 2>&1 || true
+        fi
+        git -C "$source_dir" cat-file -e "$1^{commit}" 2>/dev/null \
+            || fetch "$repo_url" "$1" >/dev/null || return 1
+    fi
+    git -C "$source_dir" checkout --quiet --detach "$1"
+    # Keeps the commit installed reachable, so a later rollback finds it here.
+    git -C "$source_dir" update-ref refs/haiku-rag/installed "$1"
+}
+
+# The install options that reinstall the components installed now.
+component_options() {
+    if [ -f "$plist" ]; then printf ' --service'; else printf ' --no-service'; fi
+    if model_installed; then printf ' --model'; else printf ' --no-model'; fi
+    if raycast_installed; then printf ' --raycast'; else printf ' --no-raycast'; fi
+    if hotkey_installed; then printf ' --hotkey'; else printf ' --no-hotkey'; fi
+}
+
+# run_installer OPTIONS: the installer of the source checkout, without questions.
+run_installer() {
+    # shellcheck disable=SC2086
+    env -u HAIKU_RAG_INSTALL_COPY HAIKU_RAG_MACOS_SOURCE="$source_dir" \
+        /bin/sh "$source_dir/install.sh" --yes --no-folders $1 </dev/null
+}
+
+# check_install SERVICE DOCUMENTS: the agents installed are loaded, the service
+# answers with at least DOCUMENTS documents (when known) and a test search answers.
+check_install() {
+    heading "Check"
+    failed=
+    for l in "$label:$plist" "$ingester_label:$ingester_plist" "$embed_label:$embed_plist"; do
+        [ -f "${l#*:}" ] || continue
+        if agent_loaded "${l%%:*}"; then note "ok  ${l%%:*} loaded"; else failed="${l%%:*} is not loaded"; fi
+    done
+    [ -z "$failed" ] || { warn "$failed"; return 1; }
+    [ "$1" = 1 ] || return 0
+    [ -f "$plist" ] || { warn "the search service's agent is not installed"; return 1; }
+    i=0
+    until n=$(documents); do
+        i=$((i + 1))
+        [ $i -lt 3 ] || { warn "the service does not answer on 127.0.0.1:$port"; return 1; }
+        sleep 5
+    done
+    if [ -n "$2" ] && [ "$n" -lt "$2" ]; then
+        warn "$n documents indexed, $2 before: documents went missing"
+        return 1
+    fi
+    note "ok  the service answers on 127.0.0.1:$port, $n documents indexed${2:+ ($2 before)}"
+    [ "$n" -gt 0 ] || return 0
+    hit=$(api 120 "/search?q=document&limit=1") && title=$(printf '%s' "$hit" | field hits.0.title) \
+        || { warn "the test search failed"; return 1; }
+    note "ok  test search: $title"
+}
+
+# reinstall_snapshot SNAPSHOT: back to the snapshot's data and the version it was
+# taken from. Fails when that version is unknown or does not install and check.
+reinstall_snapshot() {
+    commit=$(info_get "$1/snapshot.info" commit)
+    from=$(info_get "$1/snapshot.info" source)
+    documents_then=$(info_get "$1/snapshot.info" documents)
+    remove_agents
+    restore "$1"
+    note "Restored the index, queue, folder list and configuration from $1"
+    if [ -z "$commit" ]; then
+        warn "the snapshot does not say which version it was taken from; the agents stay"
+        warn "removed so nothing writes to the restored index. Install the version you had"
+        warn "from its checkout (./install.sh), or update again."
+        return 1
+    fi
+    prepare_source
+    checkout_commit "$commit" "$from" || { warn "could not fetch $commit from $from or $repo_url"; return 1; }
+    note "Reinstalling $(git -C "$source_dir" log -1 --format='%h %s' "$commit")"
+    run_installer "$2" || { warn "the installer of $commit failed"; return 1; }
+    check_install "$3" "$documents_then" || return 1
+    write_record "$commit" "$source_dir"
+}
+
+# installed_version: the commit installed now and the checkout it came from, in
+# prev_commit and prev_source; from the source checkout for an install made
+# before installs were recorded.
+installed_version() {
+    prev_commit=$(info_get "$record" commit)
+    prev_source=$(info_get "$record" source)
+    if [ -z "$prev_commit" ] && [ -f "$source_dir/install.sh" ] && [ -f "$source_dir/scripts/service.sh" ]; then
+        prev_commit=$(git -C "$source_dir" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+        prev_source=$source_dir
+    fi
+}
+
+update() {
+    heading "Update"
+    [ -f "$plist" ] || model_installed || die "nothing is installed in $app; install with install.sh first"
+    options=$(component_options)
+    has_service=0
+    [ ! -f "$plist" ] || has_service=1
+    installed_version
+    note "Installed: ${prev_commit:-unknown version}${prev_source:+ (from $prev_source)}"
+    if [ "$dry_run" = 1 ]; then
+        target=$(git ls-remote "$repo_url" "$repo_ref" </dev/null 2>/dev/null | head -n 1 | cut -f1)
+        note "Update to: $repo_url $repo_ref${target:+ ($target)}"
+        note "Snapshot:  $(printf '%s ' $data_items | sed 's/ $//') into $snapshots"
+        note "Install:  $options"
+        heading "Dry run: nothing changed"
+        return 0
+    fi
+    prepare_source
+    target=$(fetch "$repo_url" "$repo_ref") || die "could not fetch $repo_ref from $repo_url"
+    if [ "$target" = "$prev_commit" ]; then
+        note "Already at $repo_ref ($(git -C "$source_dir" log -1 --format='%h %s' "$target")): nothing to update"
+        return 0
+    fi
+    note "Update to: $repo_url $repo_ref: $(git -C "$source_dir" log -1 --format='%h %s' "$target")"
+    [ -n "$prev_commit" ] || warn "no record of the version installed: if the update fails, only the data can be restored"
+    before=
+    [ "$has_service" = 0 ] || before=$(documents) || before=
+    stop_data_agents
+    updating=$(snapshot "$prev_commit" "$prev_source" "$before")
+    note "Snapshot: $updating"
+    prune_snapshots
+    checkout_commit "$target" "" || die "could not check out $target"
+    heading "Installing $(git -C "$source_dir" log -1 --format='%h' "$target")"
+    reason=
+    if ! run_installer "$options"; then
+        reason="the installer failed"
+    elif ! check_install "$has_service" "$before"; then
+        reason="the check after installing failed"
+    fi
+    if [ -z "$reason" ]; then
+        write_record "$target" "$source_dir"
+        updating=
+        heading "Updated"
+        note "Now at $(git -C "$source_dir" log -1 --format='%h %s' "$target")"
+        note "Snapshot of the data before: $snapshots (install.sh --rollback goes back)"
+        return 0
+    fi
+    snap=$updating
+    updating=
+    heading "Update FAILED: $reason. Rolling back"
+    if reinstall_snapshot "$snap" "$options" "$has_service"; then
+        heading "Rolled back"
+        note "The update to $repo_ref failed ($reason); the version before ($commit) is"
+        note "installed again with the data as it was before the update."
+    else
+        heading "Rollback FAILED"
+        note "The update to $repo_ref failed ($reason) and so did the rollback. The data as it"
+        note "was before the update is restored from $snap."
+    fi
+    exit 1
+}
+
+rollback() {
+    heading "Rollback"
+    snap=$(latest_snapshot) || die "no snapshot in $snapshots: --update takes one before it updates"
+    commit=$(info_get "$snap/snapshot.info" commit)
+    note "Snapshot: $snap"
+    note "  taken $(info_get "$snap/snapshot.info" taken) from ${commit:-an unknown version}"
+    note "Restores the index, queue, folder list and configuration it holds, replacing"
+    note "the current ones, and reinstalls that version."
+    options=$(component_options)
+    has_service=0
+    [ ! -f "$plist" ] || has_service=1
+    [ "$dry_run" = 0 ] || { heading "Dry run: nothing changed"; return 0; }
+    [ "$interactive" = 0 ] || ask "Roll back?" y || exit 0
+    if reinstall_snapshot "$snap" "$options" "$has_service"; then
+        heading "Rolled back to $commit"
+    else
+        heading "Rollback FAILED"
+        note "The data is restored from $snap; see the messages above."
+        exit 1
+    fi
 }
 
 # --- main --------------------------------------------------------------------
 
-parse_options "$@"
 choose_mode
 check_platform
 check_command_line_tools
-say "haiku.rag for macOS, from $repo"
-if [ "$uninstall" = 1 ]; then
+if [ "$update" = 1 ]; then
+    detect
+    update
+elif [ "$rollback" = 1 ]; then
+    detect
+    rollback
+elif [ "$uninstall" = 1 ]; then
+    say "haiku.rag for macOS, from $repo"
     uninstall
 else
+    say "haiku.rag for macOS, from $repo"
     detect
     install
 fi

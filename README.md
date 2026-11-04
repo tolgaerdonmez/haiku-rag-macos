@@ -57,7 +57,8 @@ changing anything.
 Afterwards it shows the [Full Disk Access](#full-disk-access) step with the
 launcher's exact path, checks that the service answers, runs a test search when
 documents are indexed, and prints how to pause and uninstall. Running it again
-updates what changed and keeps the index, the folder list and the model.
+installs what changed and keeps the index, the folder list and the model; to move
+to a new version, use [`--update`](#update), which snapshots the data first.
 
 Options pick components without asking: `--service`, `--model`, `--raycast`,
 `--hotkey` and their `--no-` forms, `--folder PATH` (repeatable) and
@@ -78,6 +79,46 @@ curl -fsSL https://raw.githubusercontent.com/tolgaerdonmez/haiku-rag-macos/main/
 repository, branch and clone directory of the one-liner. The menu is
 `scripts/install-tui.py`, which uv runs with its pinned `questionary`; without uv,
 or with `HAIKU_RAG_TUI=0`, a numbered menu asks instead.
+
+## Update
+
+```bash
+~/Library/Application\ Support/haiku.rag/source/install.sh --update
+```
+
+(or `./install.sh --update` from a checkout, `scripts/service.sh update`, or the
+one-liner with `sh -s -- --update`) moves what is installed to the latest
+version, and back if it does not work:
+
+1. It notes the version installed (the commit in `installed.info`; for an install
+   made before installs were recorded, the commit of the `source/` clone) and the
+   number of documents the service reports.
+2. It stops the search service and the indexer and snapshots the index, the
+   queue, the folder list and the configuration (`files.lancedb`, `ingester.db`,
+   `folders.yaml`, `databases.d/`, `haiku.rag.yaml`) into
+   `snapshots/<date>-<time>/`, an APFS clone: instant, and it takes no extra disk
+   until the files change. A newer haiku.rag may rewrite the index so that the
+   version before cannot read it; the snapshot is what makes going back possible.
+3. It fetches the new version into `source/` (`--ref REF` for a branch, tag or
+   commit other than `main`; `HAIKU_RAG_MACOS_REPO` for another repository) and
+   installs the components installed now, without asking, migrating the
+   configuration and the folder register as an install does.
+4. It checks that every agent installed is loaded, that the service answers with
+   no fewer documents than before, and that a test search answers.
+
+If the install or the check fails, it restores the snapshot, reinstalls the
+version before, checks that again and says so; it exits with status 1 either way.
+`--dry-run` shows the version installed and the one it would update to, and
+changes nothing. The last two snapshots are kept.
+
+```bash
+~/Library/Application\ Support/haiku.rag/source/install.sh --rollback
+```
+
+goes back by hand: it restores the latest snapshot, replacing the current index,
+queue, folder list and configuration, and reinstalls the version it was taken
+from. The snapshot stays, so it can be repeated. Uninstalling keeps the snapshots
+with the index; `--uninstall --purge` deletes them.
 
 ## Uninstall
 
@@ -242,6 +283,7 @@ service from a checkout:
 | `folders list`, `folders add DIR`, `folders update ID`, `folders remove ID` | The indexed folders (`haiku-rag-macos folders`: `--include`, `--exclude`, `--id`, `--keep-documents`) |
 | `cli ARGUMENT...` | `haiku-rag` with the service's configuration, e.g. `cli info` |
 | `raycast`, `karabiner` | One install step |
+| `update`, `rollback` | `install.sh --update` (`--ref REF`), `install.sh --rollback` |
 | `uninstall` | Remove the agents, the embedding server and the environment; data, model, launcher and Raycast extension stay |
 
 `HAIKU_RAG_SERVICE_LABEL`, `HAIKU_RAG_SERVICE_PORT` (the search service),
@@ -262,7 +304,10 @@ ids, so every document keeps its folder, and keeps the old file as
 `haiku.rag.yaml.previous`), and the agent `com.haiku-rag.service` becomes the
 search service beside the new `com.haiku-rag.ingester`. Chunks the fork indexed
 carry their page boxes in their metadata; the search service reads them, and
-resolves the boxes of newer chunks from the stored document.
+resolves the boxes of newer chunks from the stored document. `install.sh
+--update` (run from a checkout or as the one-liner: the fork-based install's own
+copy predates it) does all this with a snapshot first, and rolls back to the
+commit of the fork-based install's `source/` clone if the check fails.
 
 An install older still embedded in-process with a `coreml` provider. The index
 records the embedder that wrote it; since the embedding server runs the same
@@ -304,7 +349,9 @@ Installed under `~/Library/Application Support/haiku.rag/`:
 | `service/ingester.log`, `service/reader.log` | The indexer's and the search service's logs |
 | `ane-server/env/`, `ane-server/ane-server.log` | The embedding server's environment and log |
 | `raycast/` | The Raycast extension's working copy |
-| `source/` | This repository, when the installer ran on its own |
+| `source/` | This repository, when the installer ran on its own or updated |
+| `installed.info` | The commit installed, which `--update` goes back to |
+| `snapshots/` | The last two snapshots `--update` took, each with its `snapshot.info`; deleted by `--uninstall --purge` |
 
 Caches, deleted by `install.sh --uninstall --purge`:
 
@@ -313,11 +360,12 @@ Caches, deleted by `install.sh --uninstall --purge`:
 | `~/Library/Caches/haiku.rag/uv/` | uv's package cache for the Python environments and the menu |
 | `~/Library/Caches/haiku.rag/huggingface/`, `~/Library/Caches/haiku.rag/docling/` | Models the indexer downloads: docling's layout and table models, the chunking tokenizer |
 | `~/Library/Application Support/com.raycast.macos/extensions/haiku-rag/` | The Raycast extension's page previews |
+| `~/Library/Application Support/haiku.rag/snapshots/` | The update snapshots |
 
 ## Development
 
 ```bash
-uv run --project ane-server pytest            # installer, menu and embedding server
+uv run --project ane-server pytest            # installer, updates, menu and embedding server
 uv run --project ane-server pytest -m integration   # also on a terminal and with test agents
 uv run --project desktop pytest desktop/tests       # search service, folders, hook, idle exit
 (cd raycast && npm install && npm test)

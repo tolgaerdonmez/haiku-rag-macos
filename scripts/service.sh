@@ -7,6 +7,7 @@
 #   scripts/service.sh folders list | add DIR | remove ID ...   # the indexed folders
 #   scripts/service.sh cli ARGUMENT...   # haiku-rag with the service's config
 #   scripts/service.sh raycast | karabiner   # one install step
+#   scripts/service.sh update [--ref REF] | rollback   # install.sh --update, --rollback
 #   scripts/service.sh uninstall
 #
 # install builds the Python environment from desktop/ with uv (its uv.lock:
@@ -424,6 +425,10 @@ case "${1:-}" in
             DOCLING_CACHE_DIR="$cache/docling" exec "$env/bin/haiku-rag" "$@" ;;
     raycast) install_raycast ;;
     karabiner) install_karabiner ;;
+    update | rollback)
+        action=$1
+        shift
+        exec /bin/sh "$repo/install.sh" "--$action" "$@" ;;
     uninstall)
         stop_agent
         stop_embedder
@@ -434,6 +439,6 @@ case "${1:-}" in
         say "launcher (its Full Disk Access grant), the configuration, folders, model, index and"
         say "queue in $app, the Raycast extension and the Karabiner rule." ;;
     *)
-        sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2
+        sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' >&2
         exit 64 ;;
 esac
